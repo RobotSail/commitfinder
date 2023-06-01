@@ -44,8 +44,8 @@ class Repo:
                 try:
                     with open(f"{self.workdir}/{filename}", "r", encoding="utf-8") as patchfh:
                         patch = patchfh.read()
-                except FileNotFoundError:
-                    print(f"WARNING: could not find patch file {filename}! Package ignored")
+                except (FileNotFoundError, UnicodeDecodeError):
+                    print(f"WARNING: could not find or read patch file {filename}! Package ignored")
                     continue
                 patch = patch.lower()
                 if ("file changed" in patch or "files changed" in patch) and ("cve-1" in patch or "cve-2" in patch):
