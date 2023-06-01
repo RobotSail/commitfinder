@@ -84,7 +84,7 @@ class Repo:
                 if line.startswith("+++"):
                     # this assumes the line always looks like:
                     # +++ b/(filepath)
-                    patchfiles.append(line[6:]
+                    patchfiles.append(line[6:])
                     waitforfile = False
             elif "new file mode" in line:
                 waitforfile = True
