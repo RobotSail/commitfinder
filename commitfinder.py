@@ -26,7 +26,8 @@ class Repo:
         return []
 
     def checkout_spec(self, spec):
-        subprocess.run(["git", "checkout", spec], cwd=self.workdir, capture_output=True)
+        ret = subprocess.run(["git", "checkout", spec], cwd=self.workdir, capture_output=True)
+        return ret.returncode == 0
 
     def find_cve_commits(self):
         cves = []
@@ -58,7 +59,9 @@ class PackageRepo(Repo):
         and - making an assumption that the file is a patch - check
         whether it modifies exactly one file.
         """
-        self.checkout_spec(rev)
+        if not self.checkout_spec(rev):
+            print(f"WARNING: could not checkout {rev}!")
+            return False
         try:
             with open(f"{self.workdir}/{filename}", "r", encoding="utf-8") as patchfh:
                 patch = patchfh.read()
@@ -71,7 +74,7 @@ class PackageRepo(Repo):
     @property
     def branches(self):
         if self.source == "fedora":
-            return ("rawhide", "f36", "f37", "f38")
+            return ("rawhide", "f36", "f37", "f38", "el6", "epel7", "epel8")
         elif self.source == "centos":
             return ("c9s", "c8s")
 
@@ -148,7 +151,9 @@ for source in (FedoraRepoSource(), CentOSRepoSource()):
     repos = source.get_package_repos()
     for repo in repos:
         for branch in repo.branches:
-            repo.checkout_spec(branch)
+            if not repo.checkout_spec(branch):
+                # just means the branch doesn't exist, that's OK
+                continue
             cves = repo.find_cve_commits()
             foundcves.update(cves)
             for cve in cves:
