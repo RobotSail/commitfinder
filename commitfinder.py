@@ -76,12 +76,6 @@ class PackageRepo(Repo):
             return ("c9s", "c8s")
 
 
-class CentOSRepo(PackageRepo):
-    @property
-    def branches(self):
-        return ("rawhide", "f36", "f37", "f38")
-
-
 class RepoSource:
     def __init__(self, name):
         self.name = name
