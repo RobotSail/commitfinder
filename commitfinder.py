@@ -35,7 +35,7 @@ class Repo:
         except UnicodeDecodeError:
             print(f"WARNING: could not parse message for rev {rev}! Ignored")
             return False
-        if "Merge: " in ret.lower():
+        if "Merge: " in ret():
             # merge commit
             return False
         if "cve-1" in ret.lower() or "cve-2" in ret.lower():
