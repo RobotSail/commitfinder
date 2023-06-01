@@ -200,7 +200,7 @@ for source in sources:
     for repo in repos:
         for branch in repo.branches:
             try:
-                repo.checkout_branch(branch):
+                repo.checkout_branch(branch)
             except KeyError:
                 # just means the branch doesn't exist, that's OK
                 continue
