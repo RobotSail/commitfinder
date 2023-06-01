@@ -47,7 +47,7 @@ class Repo:
                 print(f"Could not diff {rev} in {self.name}! Ignored")
                 return False
             if any((b"cve-1" in diffobj.diff.lower() or b"cve-2" in diffobj.diff.lower()) for diffobj in diffind):
-                print("Found CVE commit {rev} in {self.name}!")
+                print(f"Found CVE commit {rev} in {self.name}!")
                 return True
         return False
 
