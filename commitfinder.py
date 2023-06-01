@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 
+import git
 import requests
 
 WORKDIR = "/var/tmp/workdir"
@@ -21,6 +22,8 @@ class Repo:
             os.makedirs(self.clonedir)
         if not os.path.exists(self.workdir):
             subprocess.run(["git", "clone", self.url], cwd=self.clonedir, capture_output=True)
+        # init gitpython repo
+        self.pyrepo = git.Repo(self.workdir)
 
     def find_stable_branches(self):
         return []
@@ -29,35 +32,18 @@ class Repo:
         ret = subprocess.run(["git", "checkout", spec], cwd=self.workdir, capture_output=True)
         return ret.returncode == 0
 
-    def is_cve_commit(self, rev, checkfiles=True):
-        try:
-            ret = subprocess.run(["git", "show", "--quiet", rev], cwd=self.workdir, capture_output=True, encoding="utf-8").stdout
-        except UnicodeDecodeError:
-            print(f"WARNING: could not parse message for rev {rev}! Ignored")
-            return False
-        if "Merge: " in ret:
+    def is_cve_commit(self, rev, checkdiff=True):
+        pycommit = self.pyrepo.commit(rev)
+        msg = pycommit.message
+        if "Merge: " in msg:
             # merge commit
             return False
-        if "cve-1" in ret.lower() or "cve-2" in ret.lower():
+        if "cve-1" in msg.lower() or "cve-2" in msg.lower():
             return True
-        if checkfiles:
-            files = self.files_created(rev)
-            if not files:
-                return False
-            if not self.checkout_spec(rev):
-                print(f"WARNING: could not checkout {rev}!")
-                return False
-            for filename in files:
-                if filename.endswith(".patch") or filename.endswith(".diff"):
-                    try:
-                        with open(f"{self.workdir}/{filename}", "r", encoding="utf-8") as patchfh:
-                            patch = patchfh.read()
-                    except (FileNotFoundError, UnicodeDecodeError):
-                        print(f"WARNING: could not find or read patch file {filename} for rev {rev}! File ignored")
-                        continue
-                    patch = patch.lower()
-                    if ("file changed" in patch or "files changed" in patch) and ("cve-1" in patch or "cve-2" in patch):
-                        return True
+        if checkdiff:
+            diffind = pycommit.diff("rev~1", create_patch=True)
+            if any(("cve-1" in diff.lower() or "cve-2" in diff.lower()) for diff in diffind):
+                return True
         return False
 
     def all_commitrevs(self):
