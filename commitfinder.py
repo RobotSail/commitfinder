@@ -42,7 +42,7 @@ class Repo:
             return True
         if checkdiff:
             diffind = pycommit.diff(f"{rev}~1", create_patch=True)
-            if any(("cve-1" in diffobj.diff.lower() or "cve-2" in diffobj.diff.lower()) for diffobj in diffind):
+            if any((b"cve-1" in diffobj.diff.lower() or b"cve-2" in diffobj.diff.lower()) for diffobj in diffind):
                 return True
         return False
 
@@ -191,7 +191,7 @@ for source in sources:
                 # just means the branch doesn't exist, that's OK
                 continue
             #cves = repo.find_cve_commits()
-            cves = [rev for rev in repo.all_commitrevs() if repo.is_cve_commit(rev)]
+            cves = [rev for rev in repo.all_commitrevs()[:-1] if repo.is_cve_commit(rev)]
             foundcves.update(cves)
             for cve in cves:
                 files = repo.files_created(cve)
