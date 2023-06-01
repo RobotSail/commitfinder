@@ -50,7 +50,7 @@ class Repo:
                 return False
             except pygit2.GitError as err:
                 # hmmm
-                print(f"WARNING: unexpected pygit error in is_cve_commit for {self.source.name}: {self.name} {commit}! {str(err)}")
+                print(f"WARNING: unexpected pygit error in is_cve_commit for {self.source}: {self.name} {commit}! {str(err)}")
             for line in diff.splitlines():
                 if not line.startswith("-") and ("cve-1" in line or "cve-2" in line):
                     print(f"Found CVE commit {commit.hex} in {self.name}!")
@@ -67,7 +67,7 @@ class Repo:
         try:
             ret = subprocess.run(["git", "log", "--oneline"], cwd=self.workdir, capture_output=True, encoding="utf-8").stdout
         except UnicodeDecodeError:
-            print("WARNING: could not parse changelog! {self.source.name}: {self.name} ignored")
+            print(f"WARNING: could not parse changelog! {self.source}: {self.name} ignored")
             return cves
         for line in ret.splitlines():
             (rev, desc) = line.split(maxsplit=1)
@@ -103,13 +103,13 @@ class PackageRepo(Repo):
         try:
             self.checkout_spec(rev)
         except pygit2.InvalidSpecError:
-            print(f"WARNING: could not checkout {self.source.name}: {self.name} {rev}!")
+            print(f"WARNING: could not checkout {self.source}: {self.name} {rev}!")
             return False
         try:
             with open(f"{self.workdir}/{filename}", "r", encoding="utf-8") as patchfh:
                 patch = patchfh.read()
         except FileNotFoundError:
-            print(f"WARNING: could not find patch file {filename} in {self.source.name}: {self.name} {rev}! Package ignored")
+            print(f"WARNING: could not find patch file {filename} in {self.source}: {self.name} {rev}! Package ignored")
             return False
         print(f"Checking patch: {filename}")
         return patch.count("1 file changed") == 1
