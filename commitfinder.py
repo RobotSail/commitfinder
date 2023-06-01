@@ -59,6 +59,10 @@ class Repo:
                 # hmmm
                 print(f"WARNING: unexpected pygit error in is_cve_commit for {self.source}: {self.name} {commit}! {str(err)}")
                 return False
+            except UnboundLocalError:
+                # srsly wat
+                print(f"WARNING: unexpected UnboundLocalError in is_cve_commit for {self.source}: {self.name} {commit}! {str(err)}")
+                return False
             for line in diff.splitlines():
                 if not line.startswith("-") and ("cve-1" in line or "cve-2" in line):
                     print(f"Found CVE commit {commit.hex} in {self.name}!")
