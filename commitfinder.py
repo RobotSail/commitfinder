@@ -59,13 +59,12 @@ class Repo:
                 # hmmm
                 print(f"WARNING: unexpected pygit error in is_cve_commit for {self.source}: {self.name} {commit.hex}! {str(err)}")
                 return False
-            except UnboundLocalError:
+            except UnboundLocalError as err:
                 # srsly wat
                 print(f"WARNING: unexpected UnboundLocalError in is_cve_commit for {self.source}: {self.name} {commit.hex}! {str(err)}")
                 return False
             for line in diff.splitlines():
                 if not line.startswith("-") and ("cve-1" in line or "cve-2" in line):
-                    print(f"Found CVE commit {commit.hex} in {self.name}!")
                     return True
         return False
 
@@ -74,7 +73,7 @@ class Repo:
             pybranch = self.pyrepo.branches[f"origin/{branch}"]
             last = self.pyrepo[pybranch.target]
             return list(self.pyrepo.walk(last.id, pygit2.GIT_SORT_TIME))
-        except pygit2.GitError:
+        except pygit2.GitError as err:
             print(f"WARNING: unexpected pygit error in all_commits for {self.source}: {self.name}! {str(err)}")
             return False
 
