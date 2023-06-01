@@ -124,7 +124,6 @@ class PackageRepo(Repo):
         except FileNotFoundError:
             print(f"WARNING: could not find patch file {filename} in {self.source}: {self.name} {rev}! Package ignored")
             return False
-        print(f"Checking patch: {filename}")
         return patch.count("1 file changed") == 1
 
     @property
