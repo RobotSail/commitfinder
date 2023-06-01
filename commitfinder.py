@@ -75,11 +75,19 @@ class Repo:
 
     def files_created(self, rev):
         """Returns a tuple of filenames created by a given commit."""
-        patch = subprocess.run(["git", "format-patch", "--stdout", f"{rev}~1..{rev}"], cwd=self.workdir, capture_output=True, encoding="utf-8").stdout
+        pycommit = self.pyrepo.revparse_single(rev)
+        patch = self.pyrepo.diff(pycommit.parents[0], pycommit).patch
         patchfiles = []
+        waitforfile = False
         for line in patch.splitlines():
-            if "create mode" in line:
-                patchfiles.append(line.split()[-1])
+            if waitforfile:
+                if line.startswith("+++"):
+                    # this assumes the line always looks like:
+                    # +++ b/(filepath)
+                    patchfiles.append(line[6:]
+                    waitforfile = False
+            elif "new file mode" in line:
+                waitforfile = True
         return patchfiles
 
 
