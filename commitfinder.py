@@ -41,7 +41,7 @@ class Repo:
         if "cve-1" in msg.lower() or "cve-2" in msg.lower():
             return True
         if checkdiff:
-            diffind = pycommit.diff("rev~1", create_patch=True)
+            diffind = pycommit.diff(f"{rev}~1", create_patch=True)
             if any(("cve-1" in diff.lower() or "cve-2" in diff.lower()) for diff in diffind):
                 return True
         return False
