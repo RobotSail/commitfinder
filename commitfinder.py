@@ -75,7 +75,7 @@ class Repo:
             return list(self.pyrepo.walk(last.id, pygit2.GIT_SORT_TIME))
         except pygit2.GitError as err:
             print(f"WARNING: unexpected pygit error in all_commits for {self.source}: {self.name}! {str(err)}")
-            return False
+            return []
 
     def find_cve_commits(self):
         cves = []
