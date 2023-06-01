@@ -40,7 +40,11 @@ class Repo:
         if "cve-1" in msg.lower() or "cve-2" in msg.lower():
             return True
         if checkdiff:
-            diff = self.pyrepo.diff(commit.parents[0], commit).patch.lower()
+            try:
+                diff = self.pyrepo.diff(commit.parents[0], commit).patch.lower()
+            except IndexError:
+                # probably the first commit
+                return False
             if "cve-1" in diff or "cve-2" in diff:
                 print(f"Found CVE commit {commit.hex} in {self.name}!")
                 return True
@@ -48,7 +52,7 @@ class Repo:
 
     def all_commits(self):
         last = self.pyrepo[self.pyrepo.head.target]
-        return self.pyrepo.walk(last.id, pygit2.GIT_SORT_TIME)
+        return list(self.pyrepo.walk(last.id, pygit2.GIT_SORT_TIME))
 
     def find_cve_commits(self):
         cves = []
