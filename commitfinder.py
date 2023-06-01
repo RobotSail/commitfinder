@@ -54,8 +54,9 @@ class Repo:
                     return True
         return False
 
-    def all_commits(self):
-        last = self.pyrepo[self.pyrepo.head.target]
+    def all_commits(self, branch):
+        pybranch = self.pyrepo.branches[f"origin/{branch}"]
+        last = self.pyrepo[pybranch.target]
         return list(self.pyrepo.walk(last.id, pygit2.GIT_SORT_TIME))
 
     def find_cve_commits(self):
@@ -199,13 +200,12 @@ for source in sources:
     repos = source.get_package_repos()
     for repo in repos:
         for branch in repo.branches:
+            #cves = repo.find_cve_commits()
             try:
-                repo.checkout_branch(branch)
+                cves = [commit.hex for commit in repo.all_commits(branch)[:-1] if repo.is_cve_commit(commit)]
             except KeyError:
                 # just means the branch doesn't exist, that's OK
                 continue
-            #cves = repo.find_cve_commits()
-            cves = [commit.hex for commit in repo.all_commits()[:-1] if repo.is_cve_commit(commit)]
             foundcves.update(cves)
             for cve in cves:
                 files = repo.files_created(cve)
