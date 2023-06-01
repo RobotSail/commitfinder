@@ -200,8 +200,6 @@ for source in sources:
                 # just means the branch doesn't exist, that's OK
                 continue
             #cves = repo.find_cve_commits()
-            cves = []
-            for rev in repo.all_commitrevs()[:-1]:
             cves = [rev for rev in repo.all_commitrevs()[:-1] if repo.is_cve_commit(rev)]
             foundcves.update(cves)
             for cve in cves:
