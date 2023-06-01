@@ -35,6 +35,9 @@ class Repo:
         except UnicodeDecodeError:
             print(f"WARNING: could not parse message for rev {rev}! Ignored")
             return False
+        if "Merge: " in ret.lower():
+            # merge commit
+            return False
         if "cve-1" in ret.lower() or "cve-2" in ret.lower():
             return True
         if checkfiles:
@@ -45,15 +48,16 @@ class Repo:
                 print(f"WARNING: could not checkout {rev}!")
                 return False
             for filename in files:
-                try:
-                    with open(f"{self.workdir}/{filename}", "r", encoding="utf-8") as patchfh:
-                        patch = patchfh.read()
-                except (FileNotFoundError, UnicodeDecodeError):
-                    print(f"WARNING: could not find or read patch file {filename} for rev {rev}! File ignored")
-                    continue
-                patch = patch.lower()
-                if ("file changed" in patch or "files changed" in patch) and ("cve-1" in patch or "cve-2" in patch):
-                    return True
+                if filename.endswith(".patch") or filename.endswith(".diff"):
+                    try:
+                        with open(f"{self.workdir}/{filename}", "r", encoding="utf-8") as patchfh:
+                            patch = patchfh.read()
+                    except (FileNotFoundError, UnicodeDecodeError):
+                        print(f"WARNING: could not find or read patch file {filename} for rev {rev}! File ignored")
+                        continue
+                    patch = patch.lower()
+                    if ("file changed" in patch or "files changed" in patch) and ("cve-1" in patch or "cve-2" in patch):
+                        return True
         return False
 
     def all_commitrevs(self):
