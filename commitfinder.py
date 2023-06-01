@@ -30,7 +30,6 @@ class Repo:
 
     def checkout_spec(self, spec):
         self.pyrepo.checkout(spec)
-        return True
 
     def checkout_branch(self, branch):
         branch = self.pyrepo.branches[f"origin/{branch}"]
@@ -200,7 +199,9 @@ for source in sources:
     repos = source.get_package_repos()
     for repo in repos:
         for branch in repo.branches:
-            if not repo.checkout_branch(branch):
+            try:
+                repo.checkout_branch(branch):
+            except KeyError:
                 # just means the branch doesn't exist, that's OK
                 continue
             #cves = repo.find_cve_commits()
