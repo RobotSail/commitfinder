@@ -4,7 +4,7 @@ import json
 import os
 import subprocess
 
-import git
+import pygit2
 import requests
 
 WORKDIR = "/var/tmp/workdir"
@@ -23,7 +23,7 @@ class Repo:
         if not os.path.exists(self.workdir):
             subprocess.run(["git", "clone", self.url], cwd=self.clonedir, capture_output=True)
         # init gitpython repo
-        self.pyrepo = git.Repo(self.workdir)
+        self.pyrepo = pygit2.Repository(self.workdir)
 
     def find_stable_branches(self):
         return []
@@ -32,36 +32,23 @@ class Repo:
         ret = subprocess.run(["git", "checkout", spec], cwd=self.workdir, capture_output=True)
         return ret.returncode == 0
 
-    def is_cve_commit(self, rev, checkdiff=True):
-        try:
-            pycommit = self.pyrepo.commit(rev)
-        except OSError:
-            print("GitPython went nuts, ignoring {rev} in {self.name}")
-            return False
-        msg = pycommit.message
+    def is_cve_commit(self, commit, checkdiff=True):
+        msg = commit.message
         if "Merge: " in msg:
             # merge commit
             return False
         if "cve-1" in msg.lower() or "cve-2" in msg.lower():
             return True
         if checkdiff:
-            try:
-                diffind = pycommit.diff(f"{rev}~1", create_patch=True)
-            except git.exc.GitCommandError:
-                print(f"Could not diff {rev} in {self.name}! Ignored")
-                return False
-            if any((b"cve-1" in diffobj.diff.lower() or b"cve-2" in diffobj.diff.lower()) for diffobj in diffind):
-                print(f"Found CVE commit {rev} in {self.name}!")
+            diff = self.pyrepo.diff(commit.parents[0], commit).patch.lower()
+            if "cve-1" in diff or "cve-2" in diff:
+                print(f"Found CVE commit {commit.hex} in {self.name}!")
                 return True
         return False
 
-    def all_commitrevs(self):
-        try:
-            ret = subprocess.run(["git", "log", "--oneline"], cwd=self.workdir, capture_output=True, encoding="utf-8").stdout
-        except UnicodeDecodeError:
-            print("WARNING: could not parse changelog! Package ignored")
-            return []
-        return [line.split()[0] for line in ret.splitlines()]
+    def all_commits(self):
+        last = self.pyrepo[self.pyrepo.head.target]
+        return self.pyrepo.walk(last.id, pygit2.GIT_SORT_TIME)
 
     def find_cve_commits(self):
         cves = []
@@ -200,7 +187,7 @@ for source in sources:
                 # just means the branch doesn't exist, that's OK
                 continue
             #cves = repo.find_cve_commits()
-            cves = [rev for rev in repo.all_commitrevs()[:-1] if repo.is_cve_commit(rev)]
+            cves = [commit.hex for commit in repo.all_commits()[:-1] if repo.is_cve_commit(commit)]
             foundcves.update(cves)
             for cve in cves:
                 files = repo.files_created(cve)
