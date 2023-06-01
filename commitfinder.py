@@ -29,6 +29,37 @@ class Repo:
         ret = subprocess.run(["git", "checkout", spec], cwd=self.workdir, capture_output=True)
         return ret.returncode == 0
 
+    def is_cve_commit(self, rev, checkfiles=True):
+        ret = subprocess.run(["git", "show", "--quiet", rev], cwd=self.workdir, capture_output=True, encoding="utf-8").stdout
+        if "cve-1" in ret.lower() or "cve-2" in ret.lower():
+            return True
+        if checkfiles:
+            files = self.files_created(rev)
+            if not files:
+                return False
+            if not self.checkout_spec(rev):
+                print(f"WARNING: could not checkout {rev}!")
+                return False
+            for filename in files:
+                try:
+                    with open(f"{self.workdir}/{filename}", "r", encoding="utf-8") as patchfh:
+                        patch = patchfh.read()
+                except FileNotFoundError:
+                    print(f"WARNING: could not find patch file {filename}! Package ignored")
+                    continue
+                patch = patch.lower()
+                if ("file changed" in patch or "files changed" in patch) and ("cve-1" in patch or "cve-2" in patch):
+                    return True
+        return False
+
+    def all_commitrevs(self):
+        try:
+            ret = subprocess.run(["git", "log", "--oneline"], cwd=self.workdir, capture_output=True, encoding="utf-8").stdout
+        except UnicodeDecodeError:
+            print("WARNING: could not parse changelog! Package ignored")
+            return []
+        return [line.split()[0] for line in ret.splitlines()]
+
     def find_cve_commits(self):
         cves = []
         try:
@@ -165,7 +196,8 @@ for source in sources:
             if not repo.checkout_spec(branch):
                 # just means the branch doesn't exist, that's OK
                 continue
-            cves = repo.find_cve_commits()
+            #cves = repo.find_cve_commits()
+            cves = [rev for rev in repo.all_commitrevs() if rev.is_cve_commit]
             foundcves.update(cves)
             for cve in cves:
                 files = repo.files_created(cve)
