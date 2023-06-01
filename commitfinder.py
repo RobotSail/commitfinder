@@ -29,11 +29,18 @@ class Repo:
         return []
 
     def checkout_spec(self, spec):
-        self.pyrepo.checkout(spec)
+        try:
+            self.pyrepo.checkout(spec)
+            return True
+        except pygit2.InvalidSpecError:
+            # https://github.com/libgit2/pygit2/issues/1217
+            ret = subprocess.run(["git", "checkout", spec], cwd=self.workdir, capture_output=True)
+            return ret.returncode == 0
+
 
     def checkout_branch(self, branch):
         branch = self.pyrepo.branches[f"origin/{branch}"]
-        self.checkout_spec(branch)
+        return self.checkout_spec(branch)
 
     def is_cve_commit(self, commit, checkdiff=True):
         msg = commit.message
@@ -101,9 +108,7 @@ class PackageRepo(Repo):
         and - making an assumption that the file is a patch - check
         whether it modifies exactly one file.
         """
-        try:
-            self.checkout_spec(rev)
-        except pygit2.InvalidSpecError:
+        if not self.checkout_spec(rev):
             print(f"WARNING: could not checkout {self.source}: {self.name} {rev}!")
             return False
         try:
