@@ -41,7 +41,7 @@ class Repo:
             return True
         if checkdiff:
             try:
-                diff = self.pyrepo.diff(commit.parents[0], commit).patch.lower()
+                diff = self.pyrepo.diff(commit.parents[0], commit, context_lines=0).patch.lower()
             except IndexError:
                 # probably the first commit
                 return False
