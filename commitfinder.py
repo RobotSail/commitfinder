@@ -33,7 +33,11 @@ class Repo:
         return ret.returncode == 0
 
     def is_cve_commit(self, rev, checkdiff=True):
-        pycommit = self.pyrepo.commit(rev)
+        try:
+            pycommit = self.pyrepo.commit(rev)
+        except OSError:
+            print("GitPython went nuts, ignoring {rev} in {self.name}")
+            return False
         msg = pycommit.message
         if "Merge: " in msg:
             # merge commit
@@ -198,8 +202,7 @@ for source in sources:
             #cves = repo.find_cve_commits()
             cves = []
             for rev in repo.all_commitrevs()[:-1]:
-                if repo.is_cve_commit(rev):
-                    cves.append(rev)
+            cves = [rev for rev in repo.all_commitrevs()[:-1] if repo.is_cve_commit(rev)]
             foundcves.update(cves)
             for cve in cves:
                 files = repo.files_created(cve)
