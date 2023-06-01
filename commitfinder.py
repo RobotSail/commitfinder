@@ -30,7 +30,11 @@ class Repo:
         return ret.returncode == 0
 
     def is_cve_commit(self, rev, checkfiles=True):
-        ret = subprocess.run(["git", "show", "--quiet", rev], cwd=self.workdir, capture_output=True, encoding="utf-8").stdout
+        try:
+            ret = subprocess.run(["git", "show", "--quiet", rev], cwd=self.workdir, capture_output=True, encoding="utf-8").stdout
+        except UnicodeDecodeError:
+            print(f"WARNING: could not parse message for rev {rev}! Ignored")
+            return False
         if "cve-1" in ret.lower() or "cve-2" in ret.lower():
             return True
         if checkfiles:
@@ -45,7 +49,7 @@ class Repo:
                     with open(f"{self.workdir}/{filename}", "r", encoding="utf-8") as patchfh:
                         patch = patchfh.read()
                 except (FileNotFoundError, UnicodeDecodeError):
-                    print(f"WARNING: could not find or read patch file {filename}! Package ignored")
+                    print(f"WARNING: could not find or read patch file {filename} for rev {rev}! File ignored")
                     continue
                 patch = patch.lower()
                 if ("file changed" in patch or "files changed" in patch) and ("cve-1" in patch or "cve-2" in patch):
