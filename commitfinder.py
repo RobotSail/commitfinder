@@ -72,7 +72,7 @@ class Repo:
         try:
             pybranch = self.pyrepo.branches[f"origin/{branch}"]
             last = self.pyrepo[pybranch.target]
-            return list(self.pyrepo.walk(last.id, pygit2.GIT_SORT_TIME))
+            return self.pyrepo.walk(last.id, pygit2.GIT_SORT_TIME)
         except pygit2.GitError as err:
             print(f"WARNING: unexpected pygit error in all_commits for {self.source}: {self.name}! {str(err)}")
             return []
@@ -172,7 +172,8 @@ class PackageRepoSource(RepoSource):
                 next = self.next_from_response(resp)
             with open(reposfn, "w", encoding="utf-8") as reposfh:
                 json.dump(repos, reposfh)
-        return [PackageRepo(repo, self.name) for repo in repos]
+        for repo in repos:
+            yield PackageRepo(repo, self.name)
 
 
 class PagureRepoSource(PackageRepoSource):
@@ -215,12 +216,11 @@ sources = (
     GitlabRepoSource("cosstream", "https://gitlab.com", "8794173")
 )
 for source in sources:
-    repos = source.get_package_repos()
-    for repo in repos:
+    for repo in source.get_package_repos():
         for branch in repo.branches:
             #cves = repo.find_cve_commits()
             try:
-                cves = [commit.hex for commit in repo.all_commits(branch)[:-1] if repo.is_cve_commit(commit)]
+                cves = [commit.hex for commit in repo.all_commits(branch) if repo.is_cve_commit(commit)]
             except KeyError:
                 # just means the branch doesn't exist, that's OK
                 continue
