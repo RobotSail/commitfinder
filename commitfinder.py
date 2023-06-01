@@ -34,7 +34,7 @@ class Repo:
 
     def checkout_branch(self, branch):
         branch = self.pyrepo.lookup_branch(branch)
-        ref = repo.lookup_reference(branch.name)
+        ref = self.pyrepo.lookup_reference(branch.name)
         self.checkout_spec(ref)
 
     def is_cve_commit(self, commit, checkdiff=True):
