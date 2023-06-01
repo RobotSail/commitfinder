@@ -29,8 +29,13 @@ class Repo:
         return []
 
     def checkout_spec(self, spec):
-        ret = subprocess.run(["git", "checkout", spec], cwd=self.workdir, capture_output=True)
-        return ret.returncode == 0
+        self.pyrepo.checkout(spec)
+        return True
+
+    def checkout_branch(self, branch):
+        branch = self.pyrepo.lookup_branch(branch)
+        ref = repo.lookup_reference(branch.name)
+        self.checkout_spec(ref)
 
     def is_cve_commit(self, commit, checkdiff=True):
         msg = commit.message
@@ -188,7 +193,7 @@ for source in sources:
     repos = source.get_package_repos()
     for repo in repos:
         for branch in repo.branches:
-            if not repo.checkout_spec(branch):
+            if not repo.checkout_branch(branch):
                 # just means the branch doesn't exist, that's OK
                 continue
             #cves = repo.find_cve_commits()
