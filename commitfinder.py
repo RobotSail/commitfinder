@@ -75,8 +75,10 @@ class PackageRepo(Repo):
     def branches(self):
         if self.source == "fedora":
             return ("rawhide", "f36", "f37", "f38", "el6", "epel7", "epel8")
-        elif self.source == "centos":
+        elif self.source == "cosstream":
             return ("c9s", "c8s")
+        elif self.source == "centos":
+            return ("c4", "c5", "c6", "c7")
 
 
 class RepoSource:
@@ -117,22 +119,26 @@ class PackageRepoSource(RepoSource):
         return [PackageRepo(repo, self.name) for repo in repos]
 
 
-class FedoraRepoSource(PackageRepoSource):
-    def __init__(self):
-        super().__init__("fedora")
-        self.apiurl = "https://src.fedoraproject.org/api/0/projects?namespace=rpms&pattern=python-*&owner=!orphan&short=true&fork=false&per_page=100"
+class PagureRepoSource(PackageRepoSource):
+    def __init__(self, name, baseurl, namespace):
+        super().__init__(name)
+        self.baseurl = baseurl
+        self.namespace = namespace
+        self.apiurl = f"{baseurl}/api/0/projects?pattern=python-*&owner=!orphan&short=true&fork=false&per_page=100&namespace={namespace}"
 
     def repos_from_response(self, resp):
-        return [f"https://src.fedoraproject.org/rpms/{project['name']}.git" for project in resp.json()["projects"]]
+        return [f"{self.baseurl}/{self.namespace}/{project['name']}.git" for project in resp.json()["projects"]]
 
     def next_from_response(self, resp):
         return resp.json()["pagination"]["next"]
 
 
-class CentOSRepoSource(PackageRepoSource):
-    def __init__(self):
-        super().__init__("centos")
-        self.apiurl = "https://gitlab.com/api/v4/groups/8794173/projects?search=python-&archived=no&order_by=name&sort=asc&per_page=100"
+class GitlabRepoSource(PackageRepoSource):
+    def __init__(self, name, baseurl, group):
+        super().__init__(name)
+        self.baseurl = baseurl
+        self.group = group
+        self.apiurl = f"{baseurl}/api/v4/groups/{group}/projects?search=python-&archived=no&order_by=name&sort=asc&per_page=100"
 
     def repos_from_response(self, resp):
         return [project["http_url_to_repo"] for project in resp.json()]
@@ -147,7 +153,12 @@ class CentOSRepoSource(PackageRepoSource):
 foundcves = set()
 foundonep = set()
 foundonef = set()
-for source in (FedoraRepoSource(), CentOSRepoSource()):
+sources = (
+    PagureRepoSource("fedora", "https://src.fedoraproject.org", "rpms"),
+    PagureRepoSource("centos", "https://git.centos.org", "rpms"),
+    GitlabRepoSource("cosstream", "https://gitlab.com", "8794173")
+)
+for source in sources:
     repos = source.get_package_repos()
     for repo in repos:
         for branch in repo.branches:
