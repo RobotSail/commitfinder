@@ -56,6 +56,7 @@ class Repo:
 
     def all_commits(self, branch):
         pybranch = self.pyrepo.branches[f"origin/{branch}"]
+        print(f"{self.name}: {branch}: {pybranch.target}")
         last = self.pyrepo[pybranch.target]
         return list(self.pyrepo.walk(last.id, pygit2.GIT_SORT_TIME))
 
@@ -97,7 +98,9 @@ class PackageRepo(Repo):
         and - making an assumption that the file is a patch - check
         whether it modifies exactly one file.
         """
-        if not self.checkout_spec(rev):
+        try:
+            self.checkout_spec(rev)
+        except pygit2.InvalidSpecError:
             print(f"WARNING: could not checkout {rev}!")
             return False
         try:
