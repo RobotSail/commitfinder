@@ -45,9 +45,10 @@ class Repo:
             except IndexError:
                 # probably the first commit
                 return False
-            if "cve-1" in diff or "cve-2" in diff:
-                print(f"Found CVE commit {commit.hex} in {self.name}!")
-                return True
+            for line in diff.splitlines():
+                if not line.startswith("-") and ("cve-1" in line or "cve-2" in line):
+                    print(f"Found CVE commit {commit.hex} in {self.name}!")
+                    return True
         return False
 
     def all_commits(self):
