@@ -56,7 +56,6 @@ class Repo:
 
     def all_commits(self, branch):
         pybranch = self.pyrepo.branches[f"origin/{branch}"]
-        print(f"{self.name}: {branch}: {pybranch.target}")
         last = self.pyrepo[pybranch.target]
         return list(self.pyrepo.walk(last.id, pygit2.GIT_SORT_TIME))
 
