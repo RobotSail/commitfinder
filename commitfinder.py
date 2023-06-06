@@ -1,11 +1,17 @@
 #!/usr/bin/python
 
+import argparse
 import json
+import logging
 import os
 import subprocess
+import sys
 
 import pygit2
 import requests
+
+# pylint:disable=invalid-name
+logger = logging.getLogger(__name__)
 
 WORKDIR = "/var/tmp/workdir"
 
@@ -21,7 +27,9 @@ class Repo:
         if not os.path.exists(self.clonedir):
             os.makedirs(self.clonedir)
         if not os.path.exists(self.workdir):
-            subprocess.run(["git", "clone", self.url], cwd=self.clonedir, capture_output=True)
+            ret = subprocess.run(["git", "clone", self.url], cwd=self.clonedir, capture_output=True).returncode
+            if ret:
+                logger.warning("Clone of %s repo %s failed!", self.source, self.name)
         # init gitpython repo
         self.pyrepo = pygit2.Repository(self.workdir)
 
@@ -57,11 +65,11 @@ class Repo:
                 return False
             except pygit2.GitError as err:
                 # hmmm
-                print(f"WARNING: unexpected pygit error in is_cve_commit for {self.source}: {self.name} {commit.hex}! {str(err)}")
+                logger.warning("WARNING: unexpected pygit error in is_cve_commit for %s: %s %s! %s", self.source, self.name, commit.hex, str(err))
                 return False
             except UnboundLocalError as err:
                 # srsly wat
-                print(f"WARNING: unexpected UnboundLocalError in is_cve_commit for {self.source}: {self.name} {commit.hex}! {str(err)}")
+                logger.warning("WARNING: unexpected UnboundLocalError in is_cve_commit for %s: %s %s! %s", self.source, self.name, commit.hex, str(err))
                 return False
             for line in diff.splitlines():
                 if not line.startswith("-") and ("cve-1" in line or "cve-2" in line):
@@ -74,21 +82,8 @@ class Repo:
             last = self.pyrepo[pybranch.target]
             return self.pyrepo.walk(last.id, pygit2.GIT_SORT_TIME)
         except pygit2.GitError as err:
-            print(f"WARNING: unexpected pygit error in all_commits for {self.source}: {self.name}! {str(err)}")
+            logger.warning("WARNING: unexpected pygit error in all_commits for %s: %s! %s", self.source, self.name, str(err))
             return []
-
-    def find_cve_commits(self):
-        cves = []
-        try:
-            ret = subprocess.run(["git", "log", "--oneline"], cwd=self.workdir, capture_output=True, encoding="utf-8").stdout
-        except UnicodeDecodeError:
-            print(f"WARNING: could not parse changelog! {self.source}: {self.name} ignored")
-            return cves
-        for line in ret.splitlines():
-            (rev, desc) = line.split(maxsplit=1)
-            if "cve" in desc.lower():
-                cves.append(rev)
-        return cves
 
     def files_created(self, rev):
         """Returns a tuple of filenames created by a given commit."""
@@ -116,13 +111,13 @@ class PackageRepo(Repo):
         whether it modifies exactly one file.
         """
         if not self.checkout_spec(rev):
-            print(f"WARNING: could not checkout {self.source}: {self.name} {rev}!")
+            logger.warning("WARNING: could not checkout %s: %s %s!", self.source, self.name, rev)
             return False
         try:
             with open(f"{self.workdir}/{filename}", "r", encoding="utf-8") as patchfh:
                 patch = patchfh.read()
         except FileNotFoundError:
-            print(f"WARNING: could not find patch file {filename} in {self.source}: {self.name} {rev}! Package ignored")
+            logger.warning("WARNING: could not find patch file %s in %s: %s %s! Package ignored", filename, self.source, self.name, rev)
             return False
         return patch.count("1 file changed") == 1
 
@@ -133,7 +128,7 @@ class PackageRepo(Repo):
         elif self.source == "cosstream":
             return ("c9s", "c8s")
         elif self.source == "centos":
-            return ("c4", "c5", "c6", "c7")
+            return ("c7", "c6", "c5", "c4")
 
 
 class RepoSource:
@@ -172,8 +167,11 @@ class PackageRepoSource(RepoSource):
             with open(reposfn, "w", encoding="utf-8") as reposfh:
                 json.dump(repos, reposfh)
         for repo in repos:
-            yield PackageRepo(repo, self.name)
-
+            try:
+                yield PackageRepo(repo, self.name)
+            except pygit2.GitError:
+                logger.warning("Could not initialize %s repo %s!", self.name, repo)
+                continue
 
 class PagureRepoSource(PackageRepoSource):
     def __init__(self, name, baseurl, namespace):
@@ -206,33 +204,85 @@ class GitlabRepoSource(PackageRepoSource):
             # this means we hit the last page
             return None
 
-foundcves = set()
-foundonep = set()
-foundonef = set()
-sources = (
-    PagureRepoSource("fedora", "https://src.fedoraproject.org", "rpms"),
-    PagureRepoSource("centos", "https://git.centos.org", "rpms"),
-    GitlabRepoSource("cosstream", "https://gitlab.com", "8794173")
-)
-for source in sources:
-    for repo in source.get_package_repos():
-        for branch in repo.branches:
-            #cves = repo.find_cve_commits()
-            try:
-                cves = [commit.hex for commit in repo.all_commits(branch) if repo.is_cve_commit(commit)]
-            except KeyError:
-                # just means the branch doesn't exist, that's OK
-                continue
-            foundcves.update(cves)
-            for cve in cves:
-                files = repo.files_created(cve)
-                if len(files) == 1:
-                    foundonep.add(cve)
-                    if repo.patch_modifies_one_file(cve, files[0]):
-                        if cve not in foundonef:
-                            print(f"Hit: {cve} in {source.name} {repo.name}!")
-                        foundonef.add(cve)
 
-print(f"CVE commits found: {len(foundcves)}")
-print(f"CVE commits creating one file found: {len(foundonep)}")
-print(f"CVE commits creating one patch that modifies one file found: {len(foundonef)}")
+def package_cves(args):
+    """Find CVE backports in distribution package repos."""
+    foundcves = set()
+    foundonep = set()
+    foundonef = set()
+    sources = []
+    if "fedora" in args.distros:
+        sources.append(PagureRepoSource("fedora", "https://src.fedoraproject.org", "rpms"))
+    if "centos" in args.distros:
+        sources.append(PagureRepoSource("centos", "https://git.centos.org", "rpms"))
+    if "cosstream" in args.distros:
+        sources.append(GitlabRepoSource("cosstream", "https://gitlab.com", "8794173"))
+    for source in sources:
+        for repo in source.get_package_repos():
+            for branch in repo.branches:
+                try:
+                    cves = [commit.hex for commit in repo.all_commits(branch) if repo.is_cve_commit(commit)]
+                except KeyError:
+                    # just means the branch doesn't exist, that's OK
+                    continue
+                foundcves.update(cves)
+                for cve in cves:
+                    files = repo.files_created(cve)
+                    if len(files) == 1:
+                        foundonep.add(cve)
+                        if repo.patch_modifies_one_file(cve, files[0]):
+                            if cve not in foundonef:
+                                print(f"Hit: {cve} in {source.name} {repo.name}!")
+                            foundonef.add(cve)
+
+    print(f"CVE commits found: {len(foundcves)}")
+    print(f"CVE commits creating one file found: {len(foundonep)}")
+    print(f"CVE commits creating one patch that modifies one file found: {len(foundonef)}")
+
+def parse_args():
+    """Parse arguments."""
+    parser = argparse.ArgumentParser(
+        description=(
+            "Script with various capabilities aimed at building a dataset "
+            "for training AI models to do CVE backports."
+        )
+    )
+    parser.add_argument(
+        "-l",
+        "--loglevel",
+        help="The level of log messages to show",
+        choices=("debug", "info", "warning", "error", "critical"),
+        default="info",
+    )
+    # https://github.com/python/cpython/issues/60512
+    subparsers = parser.add_subparsers(dest="subcommand", required=True)
+    parser_package_cves = subparsers.add_parser(
+        "package-cves",
+        description="Find CVE backports in distribution package repos"
+    )
+    parser_package_cves.add_argument(
+        "-d",
+        "--distros",
+        help="The distribution repo source(s) to look in",
+        metavar="distro1 distro2",
+        nargs="*",
+        choices=("fedora", "centos", "cosstream"),
+        default=("fedora", "centos", "cosstream")
+    )
+    parser_package_cves.set_defaults(func=package_cves)
+    args = parser.parse_args()
+    return args
+
+def main():
+    """Main loop."""
+    try:
+        args = parse_args()
+        loglevel = getattr(logging, args.loglevel.upper(), logging.INFO)
+        logging.basicConfig(level=loglevel)
+        args.func(args)
+    except KeyboardInterrupt:
+        sys.stderr.write("Interrupted, exiting...\n")
+        sys.exit(1)
+
+if __name__ == '__main__':
+    main()
