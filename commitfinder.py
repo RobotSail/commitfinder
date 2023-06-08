@@ -77,8 +77,10 @@ class Repo:
         return False
 
     def all_commits(self, branch):
+        if not branch.startswith("origin/"):
+            branch = f"origin/{branch}"
         try:
-            pybranch = self.pyrepo.branches[f"origin/{branch}"]
+            pybranch = self.pyrepo.branches[branch]
             last = self.pyrepo[pybranch.target]
             return self.pyrepo.walk(last.id, pygit2.GIT_SORT_TIME)
         except pygit2.GitError as err:
@@ -102,6 +104,38 @@ class Repo:
                 waitforfile = True
         return patchfiles
 
+    def find_backport_commits(self):
+        """Find backport commits."""
+        headlast = self.pyrepo[self.pyrepo.head.target].id
+        # this is a bit icky but it lets us use a comprehension while
+        # guarding against completely empty commit messages
+        headcommits = [((commit.message.splitlines() or ["XXXNOCOMMITMSGFOUNDXXX"])[0], commit.hex) for commit in self.pyrepo.walk(headlast, pygit2.GIT_SORT_TIME)]
+        backports = set()
+        for branch in self.pyrepo.branches.remote:
+            try:
+                if self.pyrepo.branches[branch].is_head():
+                    # we're looking for backports...
+                    continue
+                for commit in self.all_commits(branch):
+                    if "backport of" in commit.message.lower():
+                        summ = commit.message.splitlines()[0]
+                        for (hsumm, hcomm) in headcommits:
+                            # sometimes there are commits with summs
+                            # like "Fix"...
+                            if len(hsumm) > 15 and hsumm in summ:
+                                if hcomm == commit.hex:
+                                    # this is odd, but happens - there
+                                    # are repos with commits on HEAD
+                                    # which looks like backports, e.g.
+                                    # github aio-libs/aiohttp 74e3d74
+                                    continue
+                                backports.add((commit.hex, summ, hcomm))
+                        backports.add((commit.hex, summ, None))
+            except ValueError:
+                # this probably means the branch is HEAD or something
+                pass
+        return backports
+
 
 class PackageRepo(Repo):
     def patch_modifies_one_file(self, rev, filename):
@@ -121,6 +155,45 @@ class PackageRepo(Repo):
             return False
         return patch.count("1 file changed") == 1
 
+    def find_upstream_repo(self):
+        """
+        Try and find the upstream repo and return it as an instance if
+        it's of a type we support.
+        """
+        try:
+            if not self.checkout_branch(self.branches[0]):
+                logger.warning("WARNING: could not checkout %s: %s %s!", self.source, self.name, self.branches[0])
+        except KeyError:
+            logger.warning("WARNING: could not find branch %s in %s: %s!", self.branches[0], self.source, self.name)
+        if os.path.isfile(f"{self.workdir}/dead.package"):
+            logger.debug("%s: %s %s branch is retired, ignored", self.source, self.name, self.branches[0])
+            return None
+        parsedspec = subprocess.run(["rpmspec", "--parse", f"{self.workdir}/{self.name}.spec"], cwd=self.workdir, encoding="utf-8", capture_output=True)
+        if parsedspec.returncode:
+            logger.warning("WARNING: could not parse spec file %s.spec in %s: %s! Package ignored", self.name, self.source, self.name)
+            return None
+        speclines = parsedspec.stdout.splitlines()
+        for sline in speclines:
+            if any(sline.lower().startswith(text) for text in ("url:", "source:", "source0:")):
+                ind = sline.find("github.com")
+                if ind > -1:
+                    sline = sline[ind:]
+                    elems = sline.split("/")
+                    try:
+                        (group, proj) = (elems[1], elems[2])
+                    except IndexError:
+                        logger.warning("WARNING: could not parse source %s", sline)
+                        return None
+                    proj = proj.rstrip("/")
+                    if proj.endswith(".git"):
+                        proj = proj[:-4]
+                    url = f"https://github.com/{group}/{proj}.git"
+                    try:
+                        return UpstreamRepo(url, "github")
+                    except pygit2.GitError:
+                        logger.warning("WARNING: could not clone or initialize upstream repo %s for %s: %s", url, self.source, self.name)
+        return None
+
     @property
     def branches(self):
         if self.source == "fedora":
@@ -129,6 +202,10 @@ class PackageRepo(Repo):
             return ("c9s", "c8s")
         elif self.source == "centos":
             return ("c7", "c6", "c5", "c4")
+
+
+class UpstreamRepo(Repo):
+    pass
 
 
 class RepoSource:
@@ -173,6 +250,15 @@ class PackageRepoSource(RepoSource):
                 logger.warning("Could not initialize %s repo %s!", self.name, repo)
                 continue
 
+    def get_upstream_backports(self):
+        got = set()
+        for repo in self.get_package_repos():
+            urepo = repo.find_upstream_repo()
+            if urepo:
+                if not urepo.url in got:
+                    got.add(urepo.url)
+                    yield urepo
+
 class PagureRepoSource(PackageRepoSource):
     def __init__(self, name, baseurl, namespace):
         super().__init__(name)
@@ -205,11 +291,11 @@ class GitlabRepoSource(PackageRepoSource):
             return None
 
 
-def package_cves(args):
-    """Find CVE backports in distribution package repos."""
-    foundcves = set()
-    foundonep = set()
-    foundonef = set()
+def _package_repo_sources(args):
+    """
+    Return the right package repo sources for the args (shared between
+    subcommands).
+    """
     sources = []
     if "fedora" in args.distros:
         sources.append(PagureRepoSource("fedora", "https://src.fedoraproject.org", "rpms"))
@@ -217,6 +303,14 @@ def package_cves(args):
         sources.append(PagureRepoSource("centos", "https://git.centos.org", "rpms"))
     if "cosstream" in args.distros:
         sources.append(GitlabRepoSource("cosstream", "https://gitlab.com", "8794173"))
+    return sources
+
+def package_cves(args):
+    """Find CVE backports in distribution package repos."""
+    foundcves = set()
+    foundonep = set()
+    foundonef = set()
+    sources = _package_repo_sources(args)
     for source in sources:
         for repo in source.get_package_repos():
             for branch in repo.branches:
@@ -238,6 +332,28 @@ def package_cves(args):
     print(f"CVE commits found: {len(foundcves)}")
     print(f"CVE commits creating one file found: {len(foundonep)}")
     print(f"CVE commits creating one patch that modifies one file found: {len(foundonef)}")
+
+def upstream_backports(args):
+    """
+    This finds upstream repos from the package source repos, where
+    it can, then looks for backport commits in those upstream repos.
+    """
+    matched = 0
+    unmatched = 0
+    sources = _package_repo_sources(args)
+    for source in sources:
+        for urepo in source.get_upstream_backports():
+            bps = urepo.find_backport_commits()
+            if bps:
+                for (commit, summary, ocommit) in bps:
+                    if ocommit:
+                        matched += 1
+                        print(f"{urepo.name} {commit}: {summary} - backport of {ocommit}")
+                    else:
+                        unmatched += 1
+                        print(f"{urepo.name} {commit}: {summary} - backport of unknown")
+    print(f"Found {matched} backport commits with identifiable source commits!")
+    print(f"Found {unmatched} backport commits without identifiable source commits!")
 
 def parse_args():
     """Parse arguments."""
@@ -270,6 +386,21 @@ def parse_args():
         default=("fedora", "centos", "cosstream")
     )
     parser_package_cves.set_defaults(func=package_cves)
+    parser_upstream_backports = subparsers.add_parser(
+        "upstream-backports",
+        description="Find upstream repos from distro repos, then find backports in them"
+    )
+    parser_upstream_backports.add_argument(
+        "-d",
+        "--distros",
+        help="The distribution repo source(s) to look in",
+        metavar="distro1 distro2",
+        nargs="*",
+        choices=("fedora", "centos", "cosstream"),
+        default=("fedora", "centos", "cosstream")
+    )
+    parser_upstream_backports.set_defaults(func=upstream_backports)
+
     args = parser.parse_args()
     return args
 
