@@ -21,7 +21,9 @@ class Repo:
         self.url = url
         self.source = source
         # "https://github.com/psf/requests.git" -> "requests"
-        self.name = url.split("/")[-1][:-4]
+        self.name = url.split("/")[-1]
+        if self.name.endswith(".git"):
+            self.name = self.name[:-4]
         self.clonedir = f"{WORKDIR}/{source}"
         self.workdir = f"{self.clonedir}/{self.name}"
         if not os.path.exists(self.clonedir):
@@ -250,7 +252,7 @@ class PackageRepoSource(RepoSource):
                 logger.warning("Could not initialize %s repo %s!", self.name, repo)
                 continue
 
-    def get_upstream_backports(self):
+    def get_upstream_repos(self):
         got = set()
         for repo in self.get_package_repos():
             urepo = repo.find_upstream_repo()
@@ -290,6 +292,23 @@ class GitlabRepoSource(PackageRepoSource):
             # this means we hit the last page
             return None
 
+def _parse_upstream_backports(repo):
+    """
+    Parse upstream backport commits for cmdline output (shared between
+    subcommands).
+    """
+    matched = 0
+    unmatched = 0
+    bps = repo.find_backport_commits()
+    if bps:
+        for (commit, summary, ocommit) in bps:
+            if ocommit:
+                matched += 1
+                print(f"{repo.name} {commit}: {summary} - backport of {ocommit}")
+            else:
+                unmatched += 1
+                print(f"{repo.name} {commit}: {summary} - backport of unknown")
+    return (matched, unmatched)
 
 def _package_repo_sources(args):
     """
@@ -342,16 +361,22 @@ def upstream_backports(args):
     unmatched = 0
     sources = _package_repo_sources(args)
     for source in sources:
-        for urepo in source.get_upstream_backports():
-            bps = urepo.find_backport_commits()
-            if bps:
-                for (commit, summary, ocommit) in bps:
-                    if ocommit:
-                        matched += 1
-                        print(f"{urepo.name} {commit}: {summary} - backport of {ocommit}")
-                    else:
-                        unmatched += 1
-                        print(f"{urepo.name} {commit}: {summary} - backport of unknown")
+        for urepo in source.get_upstream_repos():
+            (nmatched, nunmatched) = _parse_upstream_backports(urepo)
+            matched += nmatched
+            unmatched += nunmatched
+    print(f"Found {matched} backport commits with identifiable source commits!")
+    print(f"Found {unmatched} backport commits without identifiable source commits!")
+
+def sourcerepo_backports(args):
+    """Find backport commits in upstream repo(s) specified by URL."""
+    matched = 0
+    unmatched = 0
+    for url in args.urls:
+        urepo = UpstreamRepo(url, "cmdline")
+        (nmatched, nunmatched) = _parse_upstream_backports(urepo)
+        matched += nmatched
+        unmatched += nunmatched
     print(f"Found {matched} backport commits with identifiable source commits!")
     print(f"Found {unmatched} backport commits without identifiable source commits!")
 
@@ -400,6 +425,17 @@ def parse_args():
         default=("fedora", "centos", "cosstream")
     )
     parser_upstream_backports.set_defaults(func=upstream_backports)
+    parser_sourcerepo_backports = subparsers.add_parser(
+        "sourcerepo-backports",
+        description="Find backports in source repos specified by URL"
+    )
+    parser_sourcerepo_backports.add_argument(
+        "urls",
+        help="The git repo URL(s) to look in",
+        metavar="https://github.com/foo/bar https://gitlab.com/beep/moo",
+        nargs="+"
+    )
+    parser_sourcerepo_backports.set_defaults(func=sourcerepo_backports)
 
     args = parser.parse_args()
     return args
