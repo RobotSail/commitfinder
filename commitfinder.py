@@ -166,10 +166,11 @@ class Repo:
             logger.warning("WARNING: unexpected pygit error in all_commits for %s: %s! %s", self.source, self.name, str(err))
             return []
 
-    def files_created(self, rev):
+    def files_created(self, commit):
         """Returns a tuple of filenames created by a given commit."""
-        pycommit = self.pyrepo.revparse_single(rev)
-        patch = self.pyrepo.diff(pycommit.parents[0], pycommit).patch
+        if isinstance(commit, str):
+            commit = self.pyrepo.revparse_single(commit)
+        patch = self.pyrepo.diff(commit.parents[0], commit).patch
         patchfiles = []
         waitforfile = False
         for line in patch.splitlines():
@@ -183,19 +184,74 @@ class Repo:
                 waitforfile = True
         return patchfiles
 
+    def files_touched(self, commit):
+        return [
+            line.split()[-1]
+            for line in self.pyrepo.diff(commit.parents[0], commit).stats.format(pygit2.GIT_DIFF_STATS_NUMBER, 10).splitlines()
+        ]
+
+    def python_files_touched(self, commit):
+        return [fname for fname in self.files_touched(commit) if fname.endswith(".py")]
+
+    def python_code_files_touched(self, commit):
+        return [
+            fname for fname in self.python_files_touched(commit)
+            if not (
+                fname.startswith("test")
+                or fname.startswith("doc")
+                or fname == "setup.py"
+                or "/test_" in fname
+            )
+        ]
+
+    def patch_from_commit(self, commit, filenames):
+        """
+        Return the patch text for a given commit. If filenames is
+        [], give the whole patch text; otherwise give the patch text
+        only for the specified filename(s). Uses subprocess because
+        pygit2 does not yet wrap the filename limiting stuff.
+        """
+        args = [
+            "git",
+            "diff",
+            f"{commit.hex}^",
+            commit.hex
+        ]
+        if filenames:
+            args.append("--")
+            args.extend(filenames)
+        patch = subprocess.check_output(
+            args,
+            cwd=self.workdir,
+            encoding="utf-8",
+            stderr=subprocess.DEVNULL,
+        )
+        return patch
+
+    def file_from_commit(self, commit, filename):
+        """
+        Show a file from a commit. Thanks to
+        https://github.com/libgit2/pygit2/issues/752 ...
+        """
+        return self.pyrepo.revparse_single(f"{commit.hex}:{filename}").data.decode("utf-8")
+
     def find_backport_commits(self):
         """Find backport commits."""
-        backports = set()
+        backports = []
+        checked = set()
         for branch in self.pyrepo.branches.remote:
             try:
                 if self.pyrepo.branches[branch].is_head():
                     # we're looking for backports...
                     continue
                 for commit in self.all_commits(branch):
+                    if commit.hex in checked:
+                        continue
+                    checked.add(commit.hex)
                     bportof = self.backport_of(commit)
                     if bportof != False:
-                        summ = (commit.message.splitlines() or [""])[0]
-                        backports.add((commit.hex, summ, bportof))
+                        touched = self.python_code_files_touched(commit)
+                        backports.append((commit, bportof, touched))
             except ValueError:
                 # this probably means the branch is HEAD or something
                 pass
@@ -362,16 +418,58 @@ def _parse_upstream_backports(repo):
     """
     matched = 0
     unmatched = 0
+    singles = 0
+    bpdata = []
     bps = repo.find_backport_commits()
     if bps:
-        for (commit, summary, ocommit) in bps:
+        for (commit, ocommit, touched) in bps:
+            summary = (commit.message.splitlines() or [""])[0]
+            out = ""
             if ocommit:
                 matched += 1
-                print(f"{repo.name} {commit}: {summary} - backport of {ocommit}")
+                out = f"{repo.name} {commit.hex}: {summary} - backport of {ocommit}"
             else:
                 unmatched += 1
-                print(f"{repo.name} {commit}: {summary} - backport of unknown")
-    return (matched, unmatched)
+                out = f"{repo.name} {commit.hex}: {summary} - backport of unknown"
+            if len(touched) == 1:
+                singles += 1
+                out += " - single-file Python code backport"
+            print(out)
+            if not ocommit or len(touched) != 1:
+                continue
+            ocommit = repo.pyrepo[ocommit]
+            opatch = repo.patch_from_commit(ocommit, [touched[0]])
+            bpatch = repo.patch_from_commit(commit, [touched[0]])
+            if opatch == bpatch:
+                continue
+            obefore = repo.pyrepo.revparse_single(f"{ocommit.hex}^")
+            bbefore = repo.pyrepo.revparse_single(f"{commit.hex}^")
+            try:
+                ubfile = repo.file_from_commit(obefore, touched[0])
+                uafile = repo.file_from_commit(ocommit, touched[0])
+                bbfile = repo.file_from_commit(bbefore, touched[0])
+                bafile = repo.file_from_commit(commit, touched[0])
+            except KeyError as err:
+                logger.warning("Could not find one of the files! Probably means the filename differs between original commit and backport commit")
+                logger.warning(str(err))
+            bpdata.append(
+                {
+                    "upstream_before": ubfile,
+                    "upstream_commit_hash": ocommit.hex,
+                    "upstream_commit_message": ocommit.message,
+                    "upstream_patch": opatch,
+                    "upstream_after": uafile,
+                    "backport_before": bbfile,
+                    "backport_commit_hash": commit.hex,
+                    "backport_commit_message": commit.message,
+                    "backport_patch": bpatch,
+                    "backport_after": bafile,
+                }
+            )
+    if bpdata:
+        with open(f"{repo.clonedir}/{repo.name}-backports.json", "w", encoding="utf-8") as outfh:
+            json.dump(bpdata, outfh, indent=4)
+    return (matched, unmatched, singles)
 
 def _package_repo_sources(args):
     """
@@ -422,26 +520,35 @@ def upstream_backports(args):
     """
     matched = 0
     unmatched = 0
+    singles = 0
     sources = _package_repo_sources(args)
     for source in sources:
         for urepo in source.get_upstream_repos():
-            (nmatched, nunmatched) = _parse_upstream_backports(urepo)
+            (nmatched, nunmatched, nsingles) = _parse_upstream_backports(urepo)
             matched += nmatched
             unmatched += nunmatched
+            singles += nsingles
     print(f"Found {matched} backport commits with identifiable source commits!")
     print(f"Found {unmatched} backport commits without identifiable source commits!")
+    print(f"Found {singles} single-file Python code backport commits!")
 
 def sourcerepo_backports(args):
     """Find backport commits in upstream repo(s) specified by URL."""
     matched = 0
     unmatched = 0
+    singles = 0
     for url in args.urls:
-        urepo = UpstreamRepo(url, "cmdline")
-        (nmatched, nunmatched) = _parse_upstream_backports(urepo)
+        src = "cmdline"
+        if "github.com" in url:
+            src = "github"
+        urepo = UpstreamRepo(url, src)
+        (nmatched, nunmatched, nsingles) = _parse_upstream_backports(urepo)
         matched += nmatched
         unmatched += nunmatched
+        singles += nsingles
     print(f"Found {matched} backport commits with identifiable source commits!")
     print(f"Found {unmatched} backport commits without identifiable source commits!")
+    print(f"Found {singles} single-file Python code backport commits!")
 
 def parse_args():
     """Parse arguments."""
