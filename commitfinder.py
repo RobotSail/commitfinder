@@ -1,5 +1,29 @@
 #!/usr/bin/python
 
+# Copyright Red Hat
+#
+# This file is part of commitfinder.
+#
+# commitfinder is free software; you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+# Author: Adam Williamson <awilliam@redhat.com>
+
+"""
+Script for finding and producing information about repository commits
+with specific properties.
+"""
+
 import argparse
 import json
 import logging
@@ -13,7 +37,7 @@ import requests
 # pylint:disable=invalid-name
 logger = logging.getLogger(__name__)
 
-WORKDIR = "/var/tmp/workdir"
+WORKDIR = f"{os.path.dirname(os.path.realpath(__file__))}/workdir"
 
 
 class Repo:
