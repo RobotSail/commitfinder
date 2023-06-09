@@ -31,6 +31,7 @@ import os
 import subprocess
 import sys
 
+from cached_property import cached_property
 import pygit2
 import requests
 
@@ -58,6 +59,20 @@ class Repo:
                 logger.warning("Clone of %s repo %s failed!", self.source, self.name)
         # init gitpython repo
         self.pyrepo = pygit2.Repository(self.workdir)
+
+    @cached_property
+    def headcommits(self):
+        """
+        A (summary, hex) representation of commits from the head
+        branch in the repository.
+        """
+        headlast = self.pyrepo[self.pyrepo.head.target].id
+        # this is a bit icky but it lets us use a comprehension while
+        # guarding against completely empty commit messages
+        return {
+            commit.hex: (commit.message.splitlines() or ["XXXNOCOMMITMSGFOUNDXXX"])[0]
+            for commit in self.pyrepo.walk(headlast, pygit2.GIT_SORT_TIME)
+        }
 
     def find_stable_branches(self):
         return []
@@ -102,6 +117,44 @@ class Repo:
                     return True
         return False
 
+    def backport_of(self, commit):
+        """
+        Given a commit (object), guess if it's a backport of a commit
+        from the head branch and - if possible - of which commit.
+        A return of False means it's not a backport. A return of a
+        string means it's a backport of that commit ID. A return of
+        None means it's a backport but we don't know what commit it's
+        a backport of.
+        """
+        source = None
+        msg = commit.message
+        summ = (msg.splitlines() or [""])[0]
+        msg = msg.lower()
+        if not "backport" in msg.lower():
+            return False
+        headcommits = self.headcommits
+        # this check looks odd, but there are repos with commits on
+        # HEAD which looks like backports and those same commits in
+        # other branches, e.g. github aio-libs/aiohttp 74e3d74 . So
+        # we'll ignore any commit that is in headcommits
+        if commit.hex in self.headcommits:
+            return False
+        for hcomm in self.headcommits:
+            # very safe check
+            if f"backport of {hcomm[:7]}" in msg:
+                return hcomm
+            # bit more dangerous...
+            if hcomm[:7] in msg:
+                return hcomm
+            # summary match check...
+            hsumm = self.headcommits[hcomm]
+            if len(hsumm) > 15 and hsumm in summ:
+                return hcomm
+        if "backport of" in msg:
+            return None
+        return False
+
+
     def all_commits(self, branch):
         if not branch.startswith("origin/"):
             branch = f"origin/{branch}"
@@ -132,10 +185,6 @@ class Repo:
 
     def find_backport_commits(self):
         """Find backport commits."""
-        headlast = self.pyrepo[self.pyrepo.head.target].id
-        # this is a bit icky but it lets us use a comprehension while
-        # guarding against completely empty commit messages
-        headcommits = [((commit.message.splitlines() or ["XXXNOCOMMITMSGFOUNDXXX"])[0], commit.hex) for commit in self.pyrepo.walk(headlast, pygit2.GIT_SORT_TIME)]
         backports = set()
         for branch in self.pyrepo.branches.remote:
             try:
@@ -143,20 +192,10 @@ class Repo:
                     # we're looking for backports...
                     continue
                 for commit in self.all_commits(branch):
-                    if "backport of" in commit.message.lower():
-                        summ = commit.message.splitlines()[0]
-                        for (hsumm, hcomm) in headcommits:
-                            # sometimes there are commits with summs
-                            # like "Fix"...
-                            if len(hsumm) > 15 and hsumm in summ:
-                                if hcomm == commit.hex:
-                                    # this is odd, but happens - there
-                                    # are repos with commits on HEAD
-                                    # which looks like backports, e.g.
-                                    # github aio-libs/aiohttp 74e3d74
-                                    continue
-                                backports.add((commit.hex, summ, hcomm))
-                        backports.add((commit.hex, summ, None))
+                    bportof = self.backport_of(commit)
+                    if bportof != False:
+                        summ = (commit.message.splitlines() or [""])[0]
+                        backports.add((commit.hex, summ, bportof))
             except ValueError:
                 # this probably means the branch is HEAD or something
                 pass
