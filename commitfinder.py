@@ -198,7 +198,7 @@ class Repo:
             fname for fname in self.python_files_touched(commit)
             if not (
                 fname.startswith("test")
-                or fname.lower().startswith("doc")
+                or fname.startswith("doc/")
                 or fname == "setup.py"
                 or "/test_" in fname
             )
