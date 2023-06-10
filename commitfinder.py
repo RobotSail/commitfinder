@@ -130,7 +130,7 @@ class Repo:
         msg = commit.message
         summ = (msg.splitlines() or [""])[0]
         msg = msg.lower()
-        if not "backport" in msg.lower():
+        if not "backport" or "cherry picked from" in msg.lower():
             return False
         headcommits = self.headcommits
         # this check looks odd, but there are repos with commits on
@@ -141,7 +141,7 @@ class Repo:
             return False
         for hcomm in self.headcommits:
             # very safe check
-            if f"backport of {hcomm[:7]}" in msg:
+            if f"backport of {hcomm[:7]}" in msg or f"cherry picked from commit {hcomm[:7]}" in msg:
                 return hcomm
             # bit more dangerous...
             if hcomm[:7] in msg:
@@ -150,7 +150,7 @@ class Repo:
             hsumm = self.headcommits[hcomm]
             if len(hsumm) > 15 and hsumm in summ:
                 return hcomm
-        if "backport of" in msg:
+        if "backport of" in msg or "cherry picked from" in msg:
             return None
         return False
 
@@ -198,7 +198,7 @@ class Repo:
             fname for fname in self.python_files_touched(commit)
             if not (
                 fname.startswith("test")
-                or fname.startswith("doc")
+                or fname.lower().startswith("doc")
                 or fname == "setup.py"
                 or "/test_" in fname
             )
@@ -438,8 +438,12 @@ def _parse_upstream_backports(repo):
             if not ocommit or len(touched) != 1:
                 continue
             ocommit = repo.pyrepo[ocommit]
-            opatch = repo.patch_from_commit(ocommit, [touched[0]])
-            bpatch = repo.patch_from_commit(commit, [touched[0]])
+            try:
+                opatch = repo.patch_from_commit(ocommit, [touched[0]])
+                bpatch = repo.patch_from_commit(commit, [touched[0]])
+            except UnicodeDecodeError:
+                logger.warning("Could not parse one of the patches! Ignoring...")
+                continue
             if opatch == bpatch:
                 continue
             obefore = repo.pyrepo.revparse_single(f"{ocommit.hex}^")
