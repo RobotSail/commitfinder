@@ -130,7 +130,7 @@ class Repo:
         msg = commit.message
         summ = (msg.splitlines() or [""])[0]
         msg = msg.lower()
-        if not "backport" or "cherry picked from" in msg.lower():
+        if not ("backport" in msg or "cherry picked from" in msg):
             return False
         headcommits = self.headcommits
         # this check looks odd, but there are repos with commits on
