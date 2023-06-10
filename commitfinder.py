@@ -452,6 +452,10 @@ def _parse_upstream_backports(repo):
             except KeyError as err:
                 logger.warning("Could not find one of the files! Probably means the filename differs between original commit and backport commit")
                 logger.warning(str(err))
+                continue
+            except UnicodeDecodeError:
+                logger.warning("Could not parse one of the files! Ignorning...")
+                continue
             bpdata.append(
                 {
                     "upstream_before": ubfile,
