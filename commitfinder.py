@@ -28,6 +28,7 @@ import argparse
 import json
 import logging
 import os
+import re
 import subprocess
 import sys
 
@@ -216,10 +217,26 @@ class Repo:
             .splitlines()
         ]
 
-    def python_files_touched(self, commit):
+    def python_files_touched(self, commit) -> list[str]:
         return [fname for fname in self.files_touched(commit) if fname.endswith(".py")]
 
-    def python_code_files_touched(self, commit):
+    def golang_files_touched(self, commit) -> list[str]:
+        return [fname for fname in self.files_touched(commit) if fname.endswith(".go")]
+
+    def java_files_touched(self, commit) -> list[str]:
+        return [
+            fname for fname in self.files_touched(commit) if fname.endswith(".java")
+        ]
+
+    def javascript_files_touched(self, commit) -> list[str]:
+        extensions = [".js", ".jsx", ".ts", ".tsx"]
+        return [
+            fname
+            for fname in self.files_touched(commit)
+            if any(fname.endswith(ext) for ext in extensions)
+        ]
+
+    def python_code_files_touched(self, commit) -> list[str]:
         return [
             fname
             for fname in self.python_files_touched(commit)
@@ -228,6 +245,47 @@ class Repo:
                 or fname.startswith("doc/")
                 or fname == "setup.py"
                 or "/test_" in fname
+            )
+        ]
+
+    def golang_code_files_touched(self, commit) -> list[str]:
+        return [
+            fname
+            for fname in self.golang_files_touched(commit)
+            if not (fname.endswith("_test.go"))
+        ]
+
+    def javascript_code_files_touched(self, commit) -> list[str]:
+        js_jsx_extensions = [".js", ".jsx", ".ts", ".tsx"]
+        misc_file_types = [
+            ".test",
+            ".spec",
+            ".config",
+            "eslintrc",
+            "prettierrc",
+            "babelrc",
+        ]
+        misc_file_extensions = [
+            f"{ext}.{fext}" for ext in misc_file_types for fext in js_jsx_extensions
+        ]
+        return [
+            fname
+            for fname in self.javascript_files_touched(commit)
+            if not (
+                any(fname.endswith(ext) for ext in misc_file_extensions)
+                or fname.startswith("test")
+                or fname.startswith("doc/")
+            )
+        ]
+
+    def java_code_files_touched(self, commit) -> list[str]:
+        return [
+            fname
+            for fname in self.java_files_touched(commit)
+            if not (
+                fname.endswith("Test.java")
+                or fname.startswith("doc/")
+                or fname.startswith("test")
             )
         ]
 
@@ -259,22 +317,40 @@ class Repo:
             "utf-8"
         )
 
-    def find_backport_commits(self):
+    def code_files_touched(self, commit, selected_languages: list[str]) -> list[str]:
+        files = []
+        extractors = {
+            "python": self.python_code_files_touched,
+            "golang": self.golang_code_files_touched,
+            "javascript": self.javascript_code_files_touched,
+            "java": self.java_code_files_touched,
+        }
+        for lang in selected_languages:
+            files.extend(extractors[lang](commit))
+        return files
+
+    def find_backport_commits(self, selected_languages: list[str]) -> list:
         """Find backport commits."""
         backports = []
         checked = set()
         for branch in self.pyrepo.branches.remote:
+            # # debug
+            # if 25 <= len(backports):
+            #     break
             try:
                 if self.pyrepo.branches[branch].is_head():
                     # we're looking for backports...
                     continue
                 for commit in self.all_commits(branch):
+                    # # debug
+                    # if 25 <= len(backports):
+                    #     break
                     if commit.hex in checked:
                         continue
                     checked.add(commit.hex)
                     bportof = self.backport_of(commit)
                     if bportof != False:
-                        touched = self.python_code_files_touched(commit)
+                        touched = self.code_files_touched(commit, selected_languages)
                         backports.append((commit, bportof, touched))
             except ValueError:
                 # this probably means the branch is HEAD or something
@@ -532,13 +608,14 @@ def get_affected_files(
 
 def _parse_multiple_upstream_backports(
     repo: UpstreamRepo,
+    selected_languages: list[str]
     #    partials: bool
 ) -> (int, int, int):
     matched = 0
     unmatched = 0
     multiples = 0
     bpdata = []
-    bps = repo.find_backport_commits()
+    bps = repo.find_backport_commits(selected_languages)
     if bps:
         for commit, ocommit, touched in bps:
             summary = (commit.message.splitlines() or [""])[0]
@@ -595,7 +672,7 @@ def _parse_multiple_upstream_backports(
     return (matched, unmatched, multiples)
 
 
-def _parse_upstream_backports(repo):
+def _parse_upstream_backports(repo, selected_languages: list[str]) -> (int, int, int):
     """
     Parse upstream backport commits for cmdline output (shared between
     subcommands).
@@ -604,7 +681,7 @@ def _parse_upstream_backports(repo):
     unmatched = 0
     singles = 0
     bpdata = []
-    bps = repo.find_backport_commits()
+    bps = repo.find_backport_commits(selected_languages)
     if bps:
         for commit, ocommit, touched in bps:
             summary = (commit.message.splitlines() or [""])[0]
@@ -765,13 +842,16 @@ def sourcerepo_backports(args):
         if args.multiples:
             (nmatched, nunmatched, nmultiples) = _parse_multiple_upstream_backports(
                 urepo,
+                args.languages
                 # args.partials,
             )
             matched += nmatched
             unmatched += nunmatched
             multiples += nmultiples
         else:
-            (nmatched, nunmatched, nsingles) = _parse_upstream_backports(urepo)
+            (nmatched, nunmatched, nsingles) = _parse_upstream_backports(
+                urepo, args.languages
+            )
             matched += nmatched
             unmatched += nunmatched
             singles += nsingles
@@ -780,6 +860,27 @@ def sourcerepo_backports(args):
     print(f"Found {unmatched} backport commits without identifiable source commits!")
     print(f"Found {singles} single-file Python code backport commits!")
     print(f"Found {multiples} multiple-file Python code backport commits!")
+
+
+def add_multiples_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "-m",
+        "--multiples",
+        help="Whether or not the script should include multiple files that were patched",
+        action="store_true",
+    )
+
+
+def add_languages_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "-l",
+        "--languages",
+        help="The programming language(s) to include",
+        metavar="language1 language2",
+        nargs="+",
+        choices=("python", "golang", "javascript", "java"),
+        default=("python", "golang", "javascript", "java"),
+    )
 
 
 def parse_args():
@@ -825,6 +926,8 @@ def parse_args():
         choices=("fedora", "centos", "cosstream"),
         default=("fedora", "centos", "cosstream"),
     )
+    add_multiples_arg(parser_upstream_backports)
+    add_languages_arg(parser_upstream_backports)
     parser_upstream_backports.set_defaults(func=upstream_backports)
     parser_sourcerepo_backports = subparsers.add_parser(
         "sourcerepo-backports",
@@ -836,12 +939,8 @@ def parse_args():
         metavar="https://github.com/foo/bar https://gitlab.com/beep/moo",
         nargs="+",
     )
-    parser_sourcerepo_backports.add_argument(
-        "-m",
-        "--multiples",
-        help="Whether or not the script should include multiple files that were patched",
-        action="store_true",
-    )
+    add_multiples_arg(parser_sourcerepo_backports)
+    add_languages_arg(parser_sourcerepo_backports)
     # parser_sourcerepo_backports.add_argument(
     #     "-p",
     #     "--partials",
