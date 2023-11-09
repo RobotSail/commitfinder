@@ -28,9 +28,9 @@ import argparse
 import json
 import logging
 import os
-import re
 import subprocess
 import sys
+import time
 
 from cached_property import cached_property
 import pygit2
@@ -40,6 +40,18 @@ import requests
 logger = logging.getLogger(__name__)
 
 WORKDIR = f"{os.path.dirname(os.path.realpath(__file__))}/workdir"
+
+
+import time
+
+
+def print_progress_bar(iteration, total, prefix="", suffix="", length=50, fill="█"):
+    percent = ("{0:.1f}").format(100 * (iteration / float(total)))
+    filled_length = int(length * iteration // total)
+    bar = fill * filled_length + "-" * (length - filled_length)
+    print("\r%s |%s| %s%% %s" % (prefix, bar, percent, suffix), end="\r")
+    if iteration == total:
+        print()
 
 
 class Repo:
@@ -610,7 +622,7 @@ def _parse_multiple_upstream_backports(
     repo: UpstreamRepo,
     selected_languages: list[str]
     #    partials: bool
-) -> (int, int, int):
+) -> ((int, int, int), list[dict]):
     matched = 0
     unmatched = 0
     multiples = 0
@@ -669,10 +681,12 @@ def _parse_multiple_upstream_backports(
             f"{repo.clonedir}/{repo.name}-backports.json", "w", encoding="utf-8"
         ) as outfh:
             json.dump(bpdata, outfh, indent=4)
-    return (matched, unmatched, multiples)
+    return ((matched, unmatched, multiples), bpdata)
 
 
-def _parse_upstream_backports(repo, selected_languages: list[str]) -> (int, int, int):
+def _parse_upstream_backports(
+    repo, selected_languages: list[str]
+) -> ((int, int, int), list[dict]):
     """
     Parse upstream backport commits for cmdline output (shared between
     subcommands).
@@ -742,7 +756,7 @@ def _parse_upstream_backports(repo, selected_languages: list[str]) -> (int, int,
             f"{repo.clonedir}/{repo.name}-backports.json", "w", encoding="utf-8"
         ) as outfh:
             json.dump(bpdata, outfh, indent=4)
-    return (matched, unmatched, singles)
+    return (matched, unmatched, singles), bpdata
 
 
 def _package_repo_sources(args):
@@ -807,10 +821,16 @@ def upstream_backports(args):
     singles = 0
     multiples = 0
     sources = _package_repo_sources(args)
+    backports = {}
     for source in sources:
         for urepo in source.get_upstream_repos():
+            bpdata = []
             if args.multiples:
-                (nmatched, nunmatched, nmultiples) = _parse_multiple_upstream_backports(
+                (
+                    nmatched,
+                    nunmatched,
+                    nmultiples,
+                ), bpdata = _parse_multiple_upstream_backports(
                     urepo,
                     # args.partials,
                 )
@@ -818,14 +838,19 @@ def upstream_backports(args):
                 unmatched += nunmatched
                 multiples += nmultiples
             else:
-                (nmatched, nunmatched, nsingles) = _parse_upstream_backports(urepo)
+                (nmatched, nunmatched, nsingles), bpdata = _parse_upstream_backports(
+                    urepo
+                )
                 matched += nmatched
                 unmatched += nunmatched
                 singles += nsingles
+            backports[urepo] = bpdata
     print(f"Found {matched} backport commits with identifiable source commits!")
     print(f"Found {unmatched} backport commits without identifiable source commits!")
     print(f"Found {singles} single-file Python code backport commits!")
     print(f"Found {multiples} multiple-file Python code backport commits!")
+    with open(f"{WORKDIR}/upstream-backports.json", "w", encoding="utf-8") as outfh:
+        json.dump(backports, outfh, indent=4)
 
 
 def sourcerepo_backports(args):
@@ -834,13 +859,19 @@ def sourcerepo_backports(args):
     unmatched = 0
     singles = 0
     multiples = 0
-    for url in args.urls:
+    backports = {}
+    for i, url in enumerate(list(set(args.urls))):
         src = "cmdline"
         if "github.com" in url:
             src = "github"
         urepo = UpstreamRepo(url, src)
+        bpdata = []
         if args.multiples:
-            (nmatched, nunmatched, nmultiples) = _parse_multiple_upstream_backports(
+            (
+                nmatched,
+                nunmatched,
+                nmultiples,
+            ), bpdata = _parse_multiple_upstream_backports(
                 urepo,
                 args.languages
                 # args.partials,
@@ -849,17 +880,23 @@ def sourcerepo_backports(args):
             unmatched += nunmatched
             multiples += nmultiples
         else:
-            (nmatched, nunmatched, nsingles) = _parse_upstream_backports(
+            (nmatched, nunmatched, nsingles), bpdata = _parse_upstream_backports(
                 urepo, args.languages
             )
             matched += nmatched
             unmatched += nunmatched
             singles += nsingles
+        backports[url] = bpdata
+        print_progress_bar(
+            i + 1, len(args.urls), prefix="Progress:", suffix="Complete", length=50
+        )
 
     print(f"Found {matched} backport commits with identifiable source commits!")
     print(f"Found {unmatched} backport commits without identifiable source commits!")
     print(f"Found {singles} single-file Python code backport commits!")
     print(f"Found {multiples} multiple-file Python code backport commits!")
+    with open(f"{WORKDIR}/backports.json", "w", encoding="utf-8") as outfh:
+        json.dump(backports, outfh, indent=4)
 
 
 def add_multiples_arg(parser: argparse.ArgumentParser) -> None:
