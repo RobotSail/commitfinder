@@ -264,15 +264,11 @@ class Repo:
         backports = []
         checked = set()
         for branch in self.pyrepo.branches.remote:
-            if 25 < len(backports):
-                break
             try:
                 if self.pyrepo.branches[branch].is_head():
                     # we're looking for backports...
                     continue
                 for commit in self.all_commits(branch):
-                    if 25 < len(backports):
-                        break
                     if commit.hex in checked:
                         continue
                     checked.add(commit.hex)
@@ -485,6 +481,120 @@ class GitlabRepoSource(PackageRepoSource):
             return None
 
 
+# returns a list of all the affected files in the given commit
+def get_affected_files(
+    repo: UpstreamRepo,
+    filepaths: list[str],
+    upstream_commit_hash_before,
+    upstream_commit_hash_after,
+    backport_commit_hash_before,
+    backport_commit_hash_after,
+    # include_partials=False,
+) -> list[dict]:
+    files = []
+    for fpath in filepaths:
+        # decode_error = False
+        # key_error = False
+        keys = [
+            ("upstream_before", upstream_commit_hash_before),
+            ("upstream_after", upstream_commit_hash_after),
+            ("backport_before", backport_commit_hash_before),
+            ("backport_after", backport_commit_hash_after),
+        ]
+        file = {
+            "filepath": fpath,
+            "upstream_before": "",
+            "upstream_after": "",
+            "backport_before": "",
+            "backport_after": "",
+        }
+        for key, commit_hash in keys:
+            try:
+                file[key] = repo.file_from_commit(commit_hash, fpath)
+            except KeyError as err:
+                # key_error = True
+                logger.warning(
+                    "Could not find one of the files! Probably means the filename differs between original commit and backport commit"
+                )
+                logger.warning(str(err))
+                # add the files anyway
+                file[key] = ""
+            # TODO(RobotSail): possibly add an ability to keep this / indicate failure in the dataset
+            except UnicodeDecodeError:
+                # decode_error = True
+                logger.warning("Could not parse one of the files! Ignorning...")
+                file[key] = ""
+                continue
+
+        files.append(file)
+    return files
+
+
+def _parse_multiple_upstream_backports(
+    repo: UpstreamRepo,
+    #    partials: bool
+) -> (int, int, int):
+    matched = 0
+    unmatched = 0
+    multiples = 0
+    bpdata = []
+    bps = repo.find_backport_commits()
+    if bps:
+        for commit, ocommit, touched in bps:
+            summary = (commit.message.splitlines() or [""])[0]
+            out = ""
+            if ocommit:
+                matched += 1
+                out = f"{repo.name} {commit.hex}: {summary} - backport of {ocommit}"
+            else:
+                unmatched += 1
+                out = f"{repo.name} {commit.hex}: {summary} - backport of unknown"
+            if 0 < len(touched):
+                multiples += 1
+                out += " - multiple-file Python code backport"
+            print(out)
+            if not ocommit or len(touched) == 0:
+                continue
+            ocommit = repo.pyrepo[ocommit]
+            try:
+                opatch = repo.patch_from_commit(ocommit, touched)
+                bpatch = repo.patch_from_commit(commit, touched)
+            except UnicodeDecodeError:
+                logger.warning("Could not parse one of the patches! Ignoring...")
+                continue
+            if opatch == bpatch:
+                continue
+            obefore = repo.pyrepo.revparse_single(f"{ocommit.hex}^")
+            bbefore = repo.pyrepo.revparse_single(f"{commit.hex}^")
+            affected_files = get_affected_files(
+                repo,
+                touched,
+                obefore,
+                ocommit,
+                bbefore,
+                commit,
+                # include_partials,
+            )
+            bpdata.append(
+                {
+                    "upstream_commit_hash": ocommit.hex,
+                    "upstream_commit_message": ocommit.message,
+                    "upstream_patch": opatch,
+                    "backport_commit_hash": commit.hex,
+                    "backport_commit_message": commit.message,
+                    "backport_patch": bpatch,
+                    "affected_files": affected_files,
+                    "files_touched": touched,
+                }
+            )
+    if bpdata:
+        with open(
+            f"{repo.clonedir}/{repo.name}-backports.json", "w", encoding="utf-8"
+        ) as outfh:
+            json.dump(bpdata, outfh, indent=4)
+    return (matched, unmatched, multiples)
+
+
 def _parse_upstream_backports(repo):
     """
     Parse upstream backport commits for cmdline output (shared between
@@ -618,16 +728,27 @@ def upstream_backports(args):
     matched = 0
     unmatched = 0
     singles = 0
+    multiples = 0
     sources = _package_repo_sources(args)
     for source in sources:
         for urepo in source.get_upstream_repos():
-            (nmatched, nunmatched, nsingles) = _parse_upstream_backports(urepo)
-            matched += nmatched
-            unmatched += nunmatched
-            singles += nsingles
+            if args.multiples:
+                (nmatched, nunmatched, nmultiples) = _parse_multiple_upstream_backports(
+                    urepo,
+                    # args.partials,
+                )
+                matched += nmatched
+                unmatched += nunmatched
+                multiples += nmultiples
+            else:
+                (nmatched, nunmatched, nsingles) = _parse_upstream_backports(urepo)
+                matched += nmatched
+                unmatched += nunmatched
+                singles += nsingles
     print(f"Found {matched} backport commits with identifiable source commits!")
     print(f"Found {unmatched} backport commits without identifiable source commits!")
     print(f"Found {singles} single-file Python code backport commits!")
+    print(f"Found {multiples} multiple-file Python code backport commits!")
 
 
 def sourcerepo_backports(args):
@@ -635,18 +756,30 @@ def sourcerepo_backports(args):
     matched = 0
     unmatched = 0
     singles = 0
+    multiples = 0
     for url in args.urls:
         src = "cmdline"
         if "github.com" in url:
             src = "github"
         urepo = UpstreamRepo(url, src)
-        (nmatched, nunmatched, nsingles) = _parse_upstream_backports(urepo)
-        matched += nmatched
-        unmatched += nunmatched
-        singles += nsingles
+        if args.multiples:
+            (nmatched, nunmatched, nmultiples) = _parse_multiple_upstream_backports(
+                urepo,
+                # args.partials,
+            )
+            matched += nmatched
+            unmatched += nunmatched
+            multiples += nmultiples
+        else:
+            (nmatched, nunmatched, nsingles) = _parse_upstream_backports(urepo)
+            matched += nmatched
+            unmatched += nunmatched
+            singles += nsingles
+
     print(f"Found {matched} backport commits with identifiable source commits!")
     print(f"Found {unmatched} backport commits without identifiable source commits!")
     print(f"Found {singles} single-file Python code backport commits!")
+    print(f"Found {multiples} multiple-file Python code backport commits!")
 
 
 def parse_args():
@@ -703,8 +836,19 @@ def parse_args():
         metavar="https://github.com/foo/bar https://gitlab.com/beep/moo",
         nargs="+",
     )
+    parser_sourcerepo_backports.add_argument(
+        "-m",
+        "--multiples",
+        help="Whether or not the script should include multiple files that were patched",
+        action="store_true",
+    )
+    # parser_sourcerepo_backports.add_argument(
+    #     "-p",
+    #     "--partials",
+    #     help="Whether or not the script should include datapoints where a file is missing from either the upstream or backport commit",
+    #     action="store_true",
+    # )
     parser_sourcerepo_backports.set_defaults(func=sourcerepo_backports)
-
     args = parser.parse_args()
     return args
 
