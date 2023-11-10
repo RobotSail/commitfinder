@@ -30,6 +30,7 @@ import logging
 import os
 import subprocess
 import sys
+import re
 
 from cached_property import cached_property
 import pygit2
@@ -39,6 +40,26 @@ import requests
 logger = logging.getLogger(__name__)
 
 WORKDIR = f"{os.path.dirname(os.path.realpath(__file__))}/workdir"
+
+
+def print_progress_bar(iteration, total, prefix="", suffix="", length=50, fill="█"):
+    percent = ("{0:.1f}").format(100 * (iteration / float(total)))
+    filled_length = int(length * iteration // total)
+    bar = fill * filled_length + "-" * (length - filled_length)
+    print("\r%s |%s| %s%% %s" % (prefix, bar, percent, suffix), end="\r")
+    if iteration == total:
+        print()
+
+
+CVE_REGEX = re.compile(r"(CVE-\d{4}-\d+)")
+
+
+def get_cve_id(s: str) -> str | None:
+    """Return the first CVE ID found in the string."""
+    match = CVE_REGEX.search(s)
+    if match:
+        return match.group(0)
+    return None
 
 
 class Repo:
@@ -54,7 +75,9 @@ class Repo:
         if not os.path.exists(self.clonedir):
             os.makedirs(self.clonedir)
         if not os.path.exists(self.workdir):
-            ret = subprocess.run(["git", "clone", self.url], cwd=self.clonedir, capture_output=True).returncode
+            ret = subprocess.run(
+                ["git", "clone", self.url], cwd=self.clonedir, capture_output=True
+            ).returncode
             if ret:
                 logger.warning("Clone of %s repo %s failed!", self.source, self.name)
         # init gitpython repo
@@ -83,9 +106,10 @@ class Repo:
             return True
         except pygit2.InvalidSpecError:
             # https://github.com/libgit2/pygit2/issues/1217
-            ret = subprocess.run(["git", "checkout", spec], cwd=self.workdir, capture_output=True)
+            ret = subprocess.run(
+                ["git", "checkout", spec], cwd=self.workdir, capture_output=True
+            )
             return ret.returncode == 0
-
 
     def checkout_branch(self, branch):
         branch = self.pyrepo.branches[f"origin/{branch}"]
@@ -100,17 +124,31 @@ class Repo:
             return True
         if checkdiff:
             try:
-                diff = self.pyrepo.diff(commit.parents[0], commit, context_lines=0).patch.lower()
+                diff = self.pyrepo.diff(
+                    commit.parents[0], commit, context_lines=0
+                ).patch.lower()
             except IndexError:
                 # probably the first commit
                 return False
             except pygit2.GitError as err:
                 # hmmm
-                logger.warning("WARNING: unexpected pygit error in is_cve_commit for %s: %s %s! %s", self.source, self.name, commit.hex, str(err))
+                logger.warning(
+                    "WARNING: unexpected pygit error in is_cve_commit for %s: %s %s! %s",
+                    self.source,
+                    self.name,
+                    commit.hex,
+                    str(err),
+                )
                 return False
             except UnboundLocalError as err:
                 # srsly wat
-                logger.warning("WARNING: unexpected UnboundLocalError in is_cve_commit for %s: %s %s! %s", self.source, self.name, commit.hex, str(err))
+                logger.warning(
+                    "WARNING: unexpected UnboundLocalError in is_cve_commit for %s: %s %s! %s",
+                    self.source,
+                    self.name,
+                    commit.hex,
+                    str(err),
+                )
                 return False
             for line in diff.splitlines():
                 if not line.startswith("-") and ("cve-1" in line or "cve-2" in line):
@@ -141,7 +179,10 @@ class Repo:
             return False
         for hcomm in self.headcommits:
             # very safe check
-            if f"backport of {hcomm[:7]}" in msg or f"cherry picked from commit {hcomm[:7]}" in msg:
+            if (
+                f"backport of {hcomm[:7]}" in msg
+                or f"cherry picked from commit {hcomm[:7]}" in msg
+            ):
                 return hcomm
             # bit more dangerous...
             if hcomm[:7] in msg:
@@ -154,7 +195,6 @@ class Repo:
             return None
         return False
 
-
     def all_commits(self, branch):
         if not branch.startswith("origin/"):
             branch = f"origin/{branch}"
@@ -163,7 +203,12 @@ class Repo:
             last = self.pyrepo[pybranch.target]
             return self.pyrepo.walk(last.id, pygit2.GIT_SORT_TIME)
         except pygit2.GitError as err:
-            logger.warning("WARNING: unexpected pygit error in all_commits for %s: %s! %s", self.source, self.name, str(err))
+            logger.warning(
+                "WARNING: unexpected pygit error in all_commits for %s: %s! %s",
+                self.source,
+                self.name,
+                str(err),
+            )
             return []
 
     def files_created(self, commit):
@@ -187,20 +232,80 @@ class Repo:
     def files_touched(self, commit):
         return [
             line.split()[-1]
-            for line in self.pyrepo.diff(commit.parents[0], commit).stats.format(pygit2.GIT_DIFF_STATS_NUMBER, 10).splitlines()
+            for line in self.pyrepo.diff(commit.parents[0], commit)
+            .stats.format(pygit2.GIT_DIFF_STATS_NUMBER, 10)
+            .splitlines()
         ]
 
-    def python_files_touched(self, commit):
+    def python_files_touched(self, commit) -> list[str]:
         return [fname for fname in self.files_touched(commit) if fname.endswith(".py")]
 
-    def python_code_files_touched(self, commit):
+    def golang_files_touched(self, commit) -> list[str]:
+        return [fname for fname in self.files_touched(commit) if fname.endswith(".go")]
+
+    def java_files_touched(self, commit) -> list[str]:
         return [
-            fname for fname in self.python_files_touched(commit)
+            fname for fname in self.files_touched(commit) if fname.endswith(".java")
+        ]
+
+    def javascript_files_touched(self, commit) -> list[str]:
+        extensions = [".js", ".jsx", ".ts", ".tsx"]
+        return [
+            fname
+            for fname in self.files_touched(commit)
+            if any(fname.endswith(ext) for ext in extensions)
+        ]
+
+    def python_code_files_touched(self, commit) -> list[str]:
+        return [
+            fname
+            for fname in self.python_files_touched(commit)
             if not (
                 fname.startswith("test")
                 or fname.startswith("doc/")
                 or fname == "setup.py"
                 or "/test_" in fname
+            )
+        ]
+
+    def golang_code_files_touched(self, commit) -> list[str]:
+        return [
+            fname
+            for fname in self.golang_files_touched(commit)
+            if not (fname.endswith("_test.go"))
+        ]
+
+    def javascript_code_files_touched(self, commit) -> list[str]:
+        js_jsx_extensions = [".js", ".jsx", ".ts", ".tsx"]
+        misc_file_types = [
+            ".test",
+            ".spec",
+            ".config",
+            "eslintrc",
+            "prettierrc",
+            "babelrc",
+        ]
+        misc_file_extensions = [
+            f"{ext}.{fext}" for ext in misc_file_types for fext in js_jsx_extensions
+        ]
+        return [
+            fname
+            for fname in self.javascript_files_touched(commit)
+            if not (
+                any(fname.endswith(ext) for ext in misc_file_extensions)
+                or fname.startswith("test")
+                or fname.startswith("doc/")
+            )
+        ]
+
+    def java_code_files_touched(self, commit) -> list[str]:
+        return [
+            fname
+            for fname in self.java_files_touched(commit)
+            if not (
+                fname.endswith("Test.java")
+                or fname.startswith("doc/")
+                or fname.startswith("test")
             )
         ]
 
@@ -211,12 +316,7 @@ class Repo:
         only for the specified filename(s). Uses subprocess because
         pygit2 does not yet wrap the filename limiting stuff.
         """
-        args = [
-            "git",
-            "diff",
-            f"{commit.hex}^",
-            commit.hex
-        ]
+        args = ["git", "diff", f"{commit.hex}^", commit.hex]
         if filenames:
             args.append("--")
             args.extend(filenames)
@@ -233,9 +333,23 @@ class Repo:
         Show a file from a commit. Thanks to
         https://github.com/libgit2/pygit2/issues/752 ...
         """
-        return self.pyrepo.revparse_single(f"{commit.hex}:{filename}").data.decode("utf-8")
+        return self.pyrepo.revparse_single(f"{commit.hex}:{filename}").data.decode(
+            "utf-8"
+        )
 
-    def find_backport_commits(self):
+    def code_files_touched(self, commit, selected_languages: list[str]) -> list[str]:
+        files = []
+        extractors = {
+            "python": self.python_code_files_touched,
+            "golang": self.golang_code_files_touched,
+            "javascript": self.javascript_code_files_touched,
+            "java": self.java_code_files_touched,
+        }
+        for lang in selected_languages:
+            files.extend(extractors[lang](commit))
+        return files
+
+    def find_backport_commits(self, selected_languages: list[str]) -> list:
         """Find backport commits."""
         backports = []
         checked = set()
@@ -250,7 +364,7 @@ class Repo:
                     checked.add(commit.hex)
                     bportof = self.backport_of(commit)
                     if bportof != False:
-                        touched = self.python_code_files_touched(commit)
+                        touched = self.code_files_touched(commit, selected_languages)
                         backports.append((commit, bportof, touched))
             except ValueError:
                 # this probably means the branch is HEAD or something
@@ -266,13 +380,21 @@ class PackageRepo(Repo):
         whether it modifies exactly one file.
         """
         if not self.checkout_spec(rev):
-            logger.warning("WARNING: could not checkout %s: %s %s!", self.source, self.name, rev)
+            logger.warning(
+                "WARNING: could not checkout %s: %s %s!", self.source, self.name, rev
+            )
             return False
         try:
             with open(f"{self.workdir}/{filename}", "r", encoding="utf-8") as patchfh:
                 patch = patchfh.read()
         except FileNotFoundError:
-            logger.warning("WARNING: could not find patch file %s in %s: %s %s! Package ignored", filename, self.source, self.name, rev)
+            logger.warning(
+                "WARNING: could not find patch file %s in %s: %s %s! Package ignored",
+                filename,
+                self.source,
+                self.name,
+                rev,
+            )
             return False
         return patch.count("1 file changed") == 1
 
@@ -283,19 +405,47 @@ class PackageRepo(Repo):
         """
         try:
             if not self.checkout_branch(self.branches[0]):
-                logger.warning("WARNING: could not checkout %s: %s %s!", self.source, self.name, self.branches[0])
+                logger.warning(
+                    "WARNING: could not checkout %s: %s %s!",
+                    self.source,
+                    self.name,
+                    self.branches[0],
+                )
         except KeyError:
-            logger.warning("WARNING: could not find branch %s in %s: %s!", self.branches[0], self.source, self.name)
+            logger.warning(
+                "WARNING: could not find branch %s in %s: %s!",
+                self.branches[0],
+                self.source,
+                self.name,
+            )
         if os.path.isfile(f"{self.workdir}/dead.package"):
-            logger.debug("%s: %s %s branch is retired, ignored", self.source, self.name, self.branches[0])
+            logger.debug(
+                "%s: %s %s branch is retired, ignored",
+                self.source,
+                self.name,
+                self.branches[0],
+            )
             return None
-        parsedspec = subprocess.run(["rpmspec", "--parse", f"{self.workdir}/{self.name}.spec"], cwd=self.workdir, encoding="utf-8", capture_output=True)
+        parsedspec = subprocess.run(
+            ["rpmspec", "--parse", f"{self.workdir}/{self.name}.spec"],
+            cwd=self.workdir,
+            encoding="utf-8",
+            capture_output=True,
+        )
         if parsedspec.returncode:
-            logger.warning("WARNING: could not parse spec file %s.spec in %s: %s! Package ignored", self.name, self.source, self.name)
+            logger.warning(
+                "WARNING: could not parse spec file %s.spec in %s: %s! Package ignored",
+                self.name,
+                self.source,
+                self.name,
+            )
             return None
         speclines = parsedspec.stdout.splitlines()
         for sline in speclines:
-            if any(sline.lower().startswith(text) for text in ("url:", "source:", "source0:")):
+            if any(
+                sline.lower().startswith(text)
+                for text in ("url:", "source:", "source0:")
+            ):
                 ind = sline.find("github.com")
                 if ind > -1:
                     sline = sline[ind:]
@@ -312,7 +462,12 @@ class PackageRepo(Repo):
                     try:
                         return UpstreamRepo(url, "github")
                     except pygit2.GitError:
-                        logger.warning("WARNING: could not clone or initialize upstream repo %s for %s: %s", url, self.source, self.name)
+                        logger.warning(
+                            "WARNING: could not clone or initialize upstream repo %s for %s: %s",
+                            url,
+                            self.source,
+                            self.name,
+                        )
         return None
 
     @property
@@ -380,6 +535,7 @@ class PackageRepoSource(RepoSource):
                     got.add(urepo.url)
                     yield urepo
 
+
 class PagureRepoSource(PackageRepoSource):
     def __init__(self, name, baseurl, namespace):
         super().__init__(name)
@@ -388,7 +544,10 @@ class PagureRepoSource(PackageRepoSource):
         self.apiurl = f"{baseurl}/api/0/projects?pattern=python-*&owner=!orphan&short=true&fork=false&per_page=100&namespace={namespace}"
 
     def repos_from_response(self, resp):
-        return [f"{self.baseurl}/{self.namespace}/{project['name']}.git" for project in resp.json()["projects"]]
+        return [
+            f"{self.baseurl}/{self.namespace}/{project['name']}.git"
+            for project in resp.json()["projects"]
+        ]
 
     def next_from_response(self, resp):
         return resp.json()["pagination"]["next"]
@@ -411,7 +570,130 @@ class GitlabRepoSource(PackageRepoSource):
             # this means we hit the last page
             return None
 
-def _parse_upstream_backports(repo):
+
+# returns a list of all the affected files in the given commit
+def get_affected_files(
+    repo: UpstreamRepo,
+    filepaths: list[str],
+    upstream_commit_hash_before,
+    upstream_commit_hash_after,
+    backport_commit_hash_before,
+    backport_commit_hash_after,
+    # include_partials=False,
+) -> list[dict]:
+    files = []
+    for fpath in filepaths:
+        # decode_error = False
+        # key_error = False
+        keys = [
+            ("upstream_before", upstream_commit_hash_before),
+            ("upstream_after", upstream_commit_hash_after),
+            ("backport_before", backport_commit_hash_before),
+            ("backport_after", backport_commit_hash_after),
+        ]
+        file = {
+            "filepath": fpath,
+            "upstream_before": "",
+            "upstream_after": "",
+            "backport_before": "",
+            "backport_after": "",
+        }
+        for key, commit_hash in keys:
+            try:
+                file[key] = repo.file_from_commit(commit_hash, fpath)
+            except KeyError as err:
+                # key_error = True
+                logger.warning(
+                    "Could not find one of the files! Probably means the filename differs between original commit and backport commit"
+                )
+                logger.warning(str(err))
+                # add the files anyway
+                file[key] = ""
+            # TODO(RobotSail): possibly add an ability to keep this / indicate failure in the dataset
+            except UnicodeDecodeError:
+                # decode_error = True
+                logger.warning("Could not parse one of the files! Ignorning...")
+                file[key] = ""
+                continue
+
+        files.append(file)
+    return files
+
+
+def _parse_multiple_upstream_backports(
+    repo: UpstreamRepo,
+    selected_languages: list[str]
+    #    partials: bool
+) -> ((int, int, int), list[dict]):
+    matched = 0
+    unmatched = 0
+    multiples = 0
+    cve_commits = 0
+    bpdata = []
+    bps = repo.find_backport_commits(selected_languages)
+    if bps:
+        for commit, ocommit, touched in bps:
+            summary = (commit.message.splitlines() or [""])[0]
+            out = ""
+            if ocommit:
+                matched += 1
+                out = f"{repo.name} {commit.hex}: {summary} - backport of {ocommit}"
+            else:
+                unmatched += 1
+                out = f"{repo.name} {commit.hex}: {summary} - backport of unknown"
+            if 0 < len(touched):
+                multiples += 1
+                out += " - multiple-file Python code backport"
+            print(out)
+            if not ocommit or len(touched) == 0:
+                continue
+            is_cve_commit = repo.is_cve_commit(commit)
+            cve_commits += 1 if is_cve_commit else 0
+            ocommit = repo.pyrepo[ocommit]
+            try:
+                opatch = repo.patch_from_commit(ocommit, touched)
+                bpatch = repo.patch_from_commit(commit, touched)
+            except UnicodeDecodeError:
+                logger.warning("Could not parse one of the patches! Ignoring...")
+                continue
+            if opatch == bpatch:
+                continue
+            obefore = repo.pyrepo.revparse_single(f"{ocommit.hex}^")
+            bbefore = repo.pyrepo.revparse_single(f"{commit.hex}^")
+            affected_files = get_affected_files(
+                repo,
+                touched,
+                obefore,
+                ocommit,
+                bbefore,
+                commit,
+                # include_partials,
+            )
+            bpdata.append(
+                {
+                    "upstream_commit_hash": ocommit.hex,
+                    "upstream_commit_message": ocommit.message,
+                    "upstream_patch": opatch,
+                    "backport_commit_hash": commit.hex,
+                    "backport_commit_message": commit.message,
+                    "backport_patch": bpatch,
+                    "affected_files": affected_files,
+                    "files_touched": touched,
+                    "is_cve_commit": is_cve_commit,
+                    "cve_id": get_cve_id(commit.message),
+                }
+            )
+    if bpdata:
+        with open(
+            f"{repo.clonedir}/{repo.name}-backports.json", "w", encoding="utf-8"
+        ) as outfh:
+            json.dump(bpdata, outfh, indent=4)
+    return ((matched, unmatched, multiples, cve_commits), bpdata)
+
+
+def _parse_upstream_backports(
+    repo: UpstreamRepo, selected_languages: list[str]
+) -> ((int, int, int, int), list[dict]):
     """
     Parse upstream backport commits for cmdline output (shared between
     subcommands).
@@ -419,10 +701,11 @@ def _parse_upstream_backports(repo):
     matched = 0
     unmatched = 0
     singles = 0
+    cve_commits = 0
     bpdata = []
-    bps = repo.find_backport_commits()
+    bps = repo.find_backport_commits(selected_languages)
     if bps:
-        for (commit, ocommit, touched) in bps:
+        for commit, ocommit, touched in bps:
             summary = (commit.message.splitlines() or [""])[0]
             out = ""
             if ocommit:
@@ -437,6 +720,8 @@ def _parse_upstream_backports(repo):
             print(out)
             if not ocommit or len(touched) != 1:
                 continue
+            is_cve_commit = repo.is_cve_commit(commit)
+            cve_commits += 1 if is_cve_commit else 0
             ocommit = repo.pyrepo[ocommit]
             try:
                 opatch = repo.patch_from_commit(ocommit, [touched[0]])
@@ -454,7 +739,9 @@ def _parse_upstream_backports(repo):
                 bbfile = repo.file_from_commit(bbefore, touched[0])
                 bafile = repo.file_from_commit(commit, touched[0])
             except KeyError as err:
-                logger.warning("Could not find one of the files! Probably means the filename differs between original commit and backport commit")
+                logger.warning(
+                    "Could not find one of the files! Probably means the filename differs between original commit and backport commit"
+                )
                 logger.warning(str(err))
                 continue
             except UnicodeDecodeError:
@@ -472,12 +759,17 @@ def _parse_upstream_backports(repo):
                     "backport_commit_message": commit.message,
                     "backport_patch": bpatch,
                     "backport_after": bafile,
+                    "is_cve_commit": is_cve_commit,
+                    "cve_id": get_cve_id(commit.message),
                 }
             )
     if bpdata:
-        with open(f"{repo.clonedir}/{repo.name}-backports.json", "w", encoding="utf-8") as outfh:
+        with open(
+            f"{repo.clonedir}/{repo.name}-backports.json", "w", encoding="utf-8"
+        ) as outfh:
             json.dump(bpdata, outfh, indent=4)
-    return (matched, unmatched, singles)
+    return (matched, unmatched, singles, cve_commits), bpdata
+
 
 def _package_repo_sources(args):
     """
@@ -486,12 +778,15 @@ def _package_repo_sources(args):
     """
     sources = []
     if "fedora" in args.distros:
-        sources.append(PagureRepoSource("fedora", "https://src.fedoraproject.org", "rpms"))
+        sources.append(
+            PagureRepoSource("fedora", "https://src.fedoraproject.org", "rpms")
+        )
     if "centos" in args.distros:
         sources.append(PagureRepoSource("centos", "https://git.centos.org", "rpms"))
     if "cosstream" in args.distros:
         sources.append(GitlabRepoSource("cosstream", "https://gitlab.com", "8794173"))
     return sources
+
 
 def package_cves(args):
     """Find CVE backports in distribution package repos."""
@@ -503,7 +798,11 @@ def package_cves(args):
         for repo in source.get_package_repos():
             for branch in repo.branches:
                 try:
-                    cves = [commit.hex for commit in repo.all_commits(branch) if repo.is_cve_commit(commit)]
+                    cves = [
+                        commit.hex
+                        for commit in repo.all_commits(branch)
+                        if repo.is_cve_commit(commit)
+                    ]
                 except KeyError:
                     # just means the branch doesn't exist, that's OK
                     continue
@@ -519,7 +818,10 @@ def package_cves(args):
 
     print(f"CVE commits found: {len(foundcves)}")
     print(f"CVE commits creating one file found: {len(foundonep)}")
-    print(f"CVE commits creating one patch that modifies one file found: {len(foundonef)}")
+    print(
+        f"CVE commits creating one patch that modifies one file found: {len(foundonef)}"
+    )
+
 
 def upstream_backports(args):
     """
@@ -529,34 +831,197 @@ def upstream_backports(args):
     matched = 0
     unmatched = 0
     singles = 0
+    multiples = 0
+    cve_commits = 0
     sources = _package_repo_sources(args)
+    backports = {}
     for source in sources:
         for urepo in source.get_upstream_repos():
-            (nmatched, nunmatched, nsingles) = _parse_upstream_backports(urepo)
+            bpdata = []
+            nmatched, nunmatched, nsingles, nmultiples, ncve_commits = 0, 0, 0, 0, 0
+            if args.multiples:
+                (
+                    nmatched,
+                    nunmatched,
+                    nmultiples,
+                    ncve_commits,
+                ), bpdata = _parse_multiple_upstream_backports(
+                    urepo,
+                    # args.partials,
+                )
+            else:
+                (
+                    nmatched,
+                    nunmatched,
+                    nsingles,
+                    ncve_commits,
+                ), bpdata = _parse_upstream_backports(urepo)
             matched += nmatched
             unmatched += nunmatched
             singles += nsingles
+            multiples += nmultiples
+            cve_commits += ncve_commits
+            backports[urepo] = bpdata
     print(f"Found {matched} backport commits with identifiable source commits!")
     print(f"Found {unmatched} backport commits without identifiable source commits!")
     print(f"Found {singles} single-file Python code backport commits!")
+    print(f"Found {multiples} multiple-file Python code backport commits!")
+    print(f'Found {cve_commits} backport commits with "CVE" in the commit message!')
+    with open(f"{WORKDIR}/upstream-backports.json", "w", encoding="utf-8") as outfh:
+        json.dump(backports, outfh, indent=4)
+
 
 def sourcerepo_backports(args):
     """Find backport commits in upstream repo(s) specified by URL."""
     matched = 0
     unmatched = 0
     singles = 0
-    for url in args.urls:
+    multiples = 0
+    cve_commits = 0
+    backports = {}
+    for i, url in enumerate(list(set(args.urls))):
         src = "cmdline"
         if "github.com" in url:
             src = "github"
         urepo = UpstreamRepo(url, src)
-        (nmatched, nunmatched, nsingles) = _parse_upstream_backports(urepo)
+        bpdata = []
+        nmatched, nunmatched, nmultiples, nsingles, ncve_commits = 0, 0, 0, 0, 0
+        if args.multiples:
+            (
+                nmatched,
+                nunmatched,
+                nmultiples,
+                ncve_commits,
+            ), bpdata = _parse_multiple_upstream_backports(
+                urepo,
+                args.languages
+                # args.partials,
+            )
+        else:
+            (
+                nmatched,
+                nunmatched,
+                nsingles,
+                ncve_commits,
+            ), bpdata = _parse_upstream_backports(urepo, args.languages)
         matched += nmatched
         unmatched += nunmatched
         singles += nsingles
+        multiples += nmultiples
+        cve_commits += ncve_commits
+        backports[url] = bpdata
+        print_progress_bar(
+            i + 1, len(args.urls), prefix="Progress:", suffix="Complete", length=50
+        )
+
     print(f"Found {matched} backport commits with identifiable source commits!")
     print(f"Found {unmatched} backport commits without identifiable source commits!")
     print(f"Found {singles} single-file Python code backport commits!")
+    print(f"Found {multiples} multiple-file Python code backport commits!")
+    print(f'Found {cve_commits} backport commits with "CVE" in the commit message!')
+    with open(args.output, "w", encoding="utf-8") as outfh:
+        json.dump(backports, outfh, indent=4)
+
+
+def add_multiples_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "-m",
+        "--multiples",
+        help="Whether or not the script should include multiple files that were patched",
+        action="store_true",
+    )
+
+
+def add_languages_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "-l",
+        "--languages",
+        help="The programming language(s) to include",
+        metavar="language1 language2",
+        nargs="+",
+        choices=("python", "golang", "javascript", "java"),
+        default=("python", "golang", "javascript", "java"),
+    )
+
+
+def add_outfile_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "-o",
+        "--output",
+        help="The output file to write to",
+        metavar="./workdir/output.json",
+        default=f"{WORKDIR}/backports.json",
+    )
+
+
+def add_urls_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "urls",
+        help="The git repo URL(s) to look in",
+        metavar="https://github.com/foo/bar https://gitlab.com/beep/moo",
+        nargs="+",
+    )
+
+
+def create_sourcerepo_backports_cmd(subparsers: argparse.ArgumentParser) -> None:
+    parser_sourcerepo_backports = subparsers.add_parser(
+        "sourcerepo-backports",
+        description="Find backports in source repos specified by URL",
+    )
+    add_urls_arg(parser_sourcerepo_backports)
+    add_multiples_arg(parser_sourcerepo_backports)
+    add_languages_arg(parser_sourcerepo_backports)
+    add_outfile_arg(parser_sourcerepo_backports)
+    # parser_sourcerepo_backports.add_argument(
+    #     "-p",
+    #     "--partials",
+    #     help="Whether or not the script should include datapoints where a file is missing from either the upstream or backport commit",
+    #     action="store_true",
+    # )
+    parser_sourcerepo_backports.set_defaults(func=sourcerepo_backports)
+
+
+def add_distros_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "-d",
+        "--distros",
+        help="The distribution repo source(s) to look in",
+        metavar="distro1 distro2",
+        nargs="*",
+        choices=("fedora", "centos", "cosstream"),
+        default=("fedora", "centos", "cosstream"),
+    )
+
+
+def create_upstream_backports_cmd(subparsers: argparse.ArgumentParser) -> None:
+    parser_upstream_backports = subparsers.add_parser(
+        "upstream-backports",
+        description="Find upstream repos from distro repos, then find backports in them",
+    )
+    add_distros_arg(parser_upstream_backports)
+    add_multiples_arg(parser_upstream_backports)
+    add_languages_arg(parser_upstream_backports)
+    add_outfile_arg(parser_upstream_backports)
+    parser_upstream_backports.set_defaults(func=upstream_backports)
+
+
+def create_package_cves_cmd(subparsers: argparse.ArgumentParser) -> None:
+    parser_package_cves = subparsers.add_parser(
+        "package-cves", description="Find CVE backports in distribution package repos"
+    )
+    add_distros_arg(parser_package_cves)
+    parser_package_cves.set_defaults(func=package_cves)
+
+
+def add_log_level_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "-l",
+        "--loglevel",
+        help="The level of log messages to show",
+        choices=("debug", "info", "warning", "error", "critical"),
+        default="info",
+    )
+
 
 def parse_args():
     """Parse arguments."""
@@ -566,57 +1031,15 @@ def parse_args():
             "for training AI models to do CVE backports."
         )
     )
-    parser.add_argument(
-        "-l",
-        "--loglevel",
-        help="The level of log messages to show",
-        choices=("debug", "info", "warning", "error", "critical"),
-        default="info",
-    )
+    add_log_level_arg(parser)
     # https://github.com/python/cpython/issues/60512
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
-    parser_package_cves = subparsers.add_parser(
-        "package-cves",
-        description="Find CVE backports in distribution package repos"
-    )
-    parser_package_cves.add_argument(
-        "-d",
-        "--distros",
-        help="The distribution repo source(s) to look in",
-        metavar="distro1 distro2",
-        nargs="*",
-        choices=("fedora", "centos", "cosstream"),
-        default=("fedora", "centos", "cosstream")
-    )
-    parser_package_cves.set_defaults(func=package_cves)
-    parser_upstream_backports = subparsers.add_parser(
-        "upstream-backports",
-        description="Find upstream repos from distro repos, then find backports in them"
-    )
-    parser_upstream_backports.add_argument(
-        "-d",
-        "--distros",
-        help="The distribution repo source(s) to look in",
-        metavar="distro1 distro2",
-        nargs="*",
-        choices=("fedora", "centos", "cosstream"),
-        default=("fedora", "centos", "cosstream")
-    )
-    parser_upstream_backports.set_defaults(func=upstream_backports)
-    parser_sourcerepo_backports = subparsers.add_parser(
-        "sourcerepo-backports",
-        description="Find backports in source repos specified by URL"
-    )
-    parser_sourcerepo_backports.add_argument(
-        "urls",
-        help="The git repo URL(s) to look in",
-        metavar="https://github.com/foo/bar https://gitlab.com/beep/moo",
-        nargs="+"
-    )
-    parser_sourcerepo_backports.set_defaults(func=sourcerepo_backports)
-
+    create_package_cves_cmd(subparsers)
+    create_upstream_backports_cmd(subparsers)
+    create_sourcerepo_backports_cmd(subparsers)
     args = parser.parse_args()
     return args
+
 
 def main():
     """Main loop."""
@@ -629,5 +1052,6 @@ def main():
         sys.stderr.write("Interrupted, exiting...\n")
         sys.exit(1)
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
     main()
