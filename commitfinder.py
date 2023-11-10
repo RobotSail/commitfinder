@@ -30,7 +30,7 @@ import logging
 import os
 import subprocess
 import sys
-import time
+import re
 
 from cached_property import cached_property
 import pygit2
@@ -42,9 +42,6 @@ logger = logging.getLogger(__name__)
 WORKDIR = f"{os.path.dirname(os.path.realpath(__file__))}/workdir"
 
 
-import time
-
-
 def print_progress_bar(iteration, total, prefix="", suffix="", length=50, fill="█"):
     percent = ("{0:.1f}").format(100 * (iteration / float(total)))
     filled_length = int(length * iteration // total)
@@ -52,6 +49,17 @@ def print_progress_bar(iteration, total, prefix="", suffix="", length=50, fill="
     print("\r%s |%s| %s%% %s" % (prefix, bar, percent, suffix), end="\r")
     if iteration == total:
         print()
+
+
+CVE_REGEX = re.compile(r"(CVE-\d{4}-\d+)")
+
+
+def get_cve_id(s: str) -> str | None:
+    """Return the first CVE ID found in the string."""
+    match = CVE_REGEX.search(s)
+    if match:
+        return match.group(0)
+    return None
 
 
 class Repo:
@@ -346,17 +354,11 @@ class Repo:
         backports = []
         checked = set()
         for branch in self.pyrepo.branches.remote:
-            # # debug
-            # if 25 <= len(backports):
-            #     break
             try:
                 if self.pyrepo.branches[branch].is_head():
                     # we're looking for backports...
                     continue
                 for commit in self.all_commits(branch):
-                    # # debug
-                    # if 25 <= len(backports):
-                    #     break
                     if commit.hex in checked:
                         continue
                     checked.add(commit.hex)
@@ -626,6 +628,7 @@ def _parse_multiple_upstream_backports(
     matched = 0
     unmatched = 0
     multiples = 0
+    cve_commits = 0
     bpdata = []
     bps = repo.find_backport_commits(selected_languages)
     if bps:
@@ -644,6 +647,8 @@ def _parse_multiple_upstream_backports(
             print(out)
             if not ocommit or len(touched) == 0:
                 continue
+            is_cve_commit = repo.is_cve_commit(commit)
+            cve_commits += 1 if is_cve_commit else 0
             ocommit = repo.pyrepo[ocommit]
             try:
                 opatch = repo.patch_from_commit(ocommit, touched)
@@ -674,6 +679,8 @@ def _parse_multiple_upstream_backports(
                     "backport_patch": bpatch,
                     "affected_files": affected_files,
                     "files_touched": touched,
+                    "is_cve_commit": is_cve_commit,
+                    "cve_id": get_cve_id(commit.message),
                 }
             )
     if bpdata:
@@ -681,12 +688,12 @@ def _parse_multiple_upstream_backports(
             f"{repo.clonedir}/{repo.name}-backports.json", "w", encoding="utf-8"
         ) as outfh:
             json.dump(bpdata, outfh, indent=4)
-    return ((matched, unmatched, multiples), bpdata)
+    return ((matched, unmatched, multiples, cve_commits), bpdata)
 
 
 def _parse_upstream_backports(
-    repo, selected_languages: list[str]
-) -> ((int, int, int), list[dict]):
+    repo: UpstreamRepo, selected_languages: list[str]
+) -> ((int, int, int, int), list[dict]):
     """
     Parse upstream backport commits for cmdline output (shared between
     subcommands).
@@ -694,6 +701,7 @@ def _parse_upstream_backports(
     matched = 0
     unmatched = 0
     singles = 0
+    cve_commits = 0
     bpdata = []
     bps = repo.find_backport_commits(selected_languages)
     if bps:
@@ -712,6 +720,8 @@ def _parse_upstream_backports(
             print(out)
             if not ocommit or len(touched) != 1:
                 continue
+            is_cve_commit = repo.is_cve_commit(commit)
+            cve_commits += 1 if is_cve_commit else 0
             ocommit = repo.pyrepo[ocommit]
             try:
                 opatch = repo.patch_from_commit(ocommit, [touched[0]])
@@ -749,6 +759,8 @@ def _parse_upstream_backports(
                     "backport_commit_message": commit.message,
                     "backport_patch": bpatch,
                     "backport_after": bafile,
+                    "is_cve_commit": is_cve_commit,
+                    "cve_id": get_cve_id(commit.message),
                 }
             )
     if bpdata:
@@ -756,7 +768,7 @@ def _parse_upstream_backports(
             f"{repo.clonedir}/{repo.name}-backports.json", "w", encoding="utf-8"
         ) as outfh:
             json.dump(bpdata, outfh, indent=4)
-    return (matched, unmatched, singles), bpdata
+    return (matched, unmatched, singles, cve_commits), bpdata
 
 
 def _package_repo_sources(args):
@@ -820,35 +832,41 @@ def upstream_backports(args):
     unmatched = 0
     singles = 0
     multiples = 0
+    cve_commits = 0
     sources = _package_repo_sources(args)
     backports = {}
     for source in sources:
         for urepo in source.get_upstream_repos():
             bpdata = []
+            nmatched, nunmatched, nsingles, nmultiples, ncve_commits = 0, 0, 0, 0, 0
             if args.multiples:
                 (
                     nmatched,
                     nunmatched,
                     nmultiples,
+                    ncve_commits,
                 ), bpdata = _parse_multiple_upstream_backports(
                     urepo,
                     # args.partials,
                 )
-                matched += nmatched
-                unmatched += nunmatched
-                multiples += nmultiples
             else:
-                (nmatched, nunmatched, nsingles), bpdata = _parse_upstream_backports(
-                    urepo
-                )
-                matched += nmatched
-                unmatched += nunmatched
-                singles += nsingles
+                (
+                    nmatched,
+                    nunmatched,
+                    nsingles,
+                    ncve_commits,
+                ), bpdata = _parse_upstream_backports(urepo)
+            matched += nmatched
+            unmatched += nunmatched
+            singles += nsingles
+            multiples += nmultiples
+            cve_commits += ncve_commits
             backports[urepo] = bpdata
     print(f"Found {matched} backport commits with identifiable source commits!")
     print(f"Found {unmatched} backport commits without identifiable source commits!")
     print(f"Found {singles} single-file Python code backport commits!")
     print(f"Found {multiples} multiple-file Python code backport commits!")
+    print(f'Found {cve_commits} backport commits with "CVE" in the commit message!')
     with open(f"{WORKDIR}/upstream-backports.json", "w", encoding="utf-8") as outfh:
         json.dump(backports, outfh, indent=4)
 
@@ -859,6 +877,7 @@ def sourcerepo_backports(args):
     unmatched = 0
     singles = 0
     multiples = 0
+    cve_commits = 0
     backports = {}
     for i, url in enumerate(list(set(args.urls))):
         src = "cmdline"
@@ -866,26 +885,30 @@ def sourcerepo_backports(args):
             src = "github"
         urepo = UpstreamRepo(url, src)
         bpdata = []
+        nmatched, nunmatched, nmultiples, nsingles, ncve_commits = 0, 0, 0, 0, 0
         if args.multiples:
             (
                 nmatched,
                 nunmatched,
                 nmultiples,
+                ncve_commits,
             ), bpdata = _parse_multiple_upstream_backports(
                 urepo,
                 args.languages
                 # args.partials,
             )
-            matched += nmatched
-            unmatched += nunmatched
-            multiples += nmultiples
         else:
-            (nmatched, nunmatched, nsingles), bpdata = _parse_upstream_backports(
-                urepo, args.languages
-            )
-            matched += nmatched
-            unmatched += nunmatched
-            singles += nsingles
+            (
+                nmatched,
+                nunmatched,
+                nsingles,
+                ncve_commits,
+            ), bpdata = _parse_upstream_backports(urepo, args.languages)
+        matched += nmatched
+        unmatched += nunmatched
+        singles += nsingles
+        multiples += nmultiples
+        cve_commits += ncve_commits
         backports[url] = bpdata
         print_progress_bar(
             i + 1, len(args.urls), prefix="Progress:", suffix="Complete", length=50
@@ -895,7 +918,8 @@ def sourcerepo_backports(args):
     print(f"Found {unmatched} backport commits without identifiable source commits!")
     print(f"Found {singles} single-file Python code backport commits!")
     print(f"Found {multiples} multiple-file Python code backport commits!")
-    with open(f"{WORKDIR}/backports.json", "w", encoding="utf-8") as outfh:
+    print(f'Found {cve_commits} backport commits with "CVE" in the commit message!')
+    with open(args.output, "w", encoding="utf-8") as outfh:
         json.dump(backports, outfh, indent=4)
 
 
@@ -920,6 +944,85 @@ def add_languages_arg(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_outfile_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "-o",
+        "--output",
+        help="The output file to write to",
+        metavar="./workdir/output.json",
+        default=f"{WORKDIR}/backports.json",
+    )
+
+
+def add_urls_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "urls",
+        help="The git repo URL(s) to look in",
+        metavar="https://github.com/foo/bar https://gitlab.com/beep/moo",
+        nargs="+",
+    )
+
+
+def create_sourcerepo_backports_cmd(subparsers: argparse.ArgumentParser) -> None:
+    parser_sourcerepo_backports = subparsers.add_parser(
+        "sourcerepo-backports",
+        description="Find backports in source repos specified by URL",
+    )
+    add_urls_arg(parser_sourcerepo_backports)
+    add_multiples_arg(parser_sourcerepo_backports)
+    add_languages_arg(parser_sourcerepo_backports)
+    add_outfile_arg(parser_sourcerepo_backports)
+    # parser_sourcerepo_backports.add_argument(
+    #     "-p",
+    #     "--partials",
+    #     help="Whether or not the script should include datapoints where a file is missing from either the upstream or backport commit",
+    #     action="store_true",
+    # )
+    parser_sourcerepo_backports.set_defaults(func=sourcerepo_backports)
+
+
+def add_distros_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "-d",
+        "--distros",
+        help="The distribution repo source(s) to look in",
+        metavar="distro1 distro2",
+        nargs="*",
+        choices=("fedora", "centos", "cosstream"),
+        default=("fedora", "centos", "cosstream"),
+    )
+
+
+def create_upstream_backports_cmd(subparsers: argparse.ArgumentParser) -> None:
+    parser_upstream_backports = subparsers.add_parser(
+        "upstream-backports",
+        description="Find upstream repos from distro repos, then find backports in them",
+    )
+    add_distros_arg(parser_upstream_backports)
+    add_multiples_arg(parser_upstream_backports)
+    add_languages_arg(parser_upstream_backports)
+    add_outfile_arg(parser_upstream_backports)
+    parser_upstream_backports.set_defaults(func=upstream_backports)
+
+
+def create_package_cves_cmd(subparsers: argparse.ArgumentParser) -> None:
+    parser_package_cves = subparsers.add_parser(
+        "package-cves", description="Find CVE backports in distribution package repos"
+    )
+    add_distros_arg(parser_package_cves)
+    parser_package_cves.set_defaults(func=package_cves)
+
+
+def add_log_level_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "-l",
+        "--loglevel",
+        help="The level of log messages to show",
+        choices=("debug", "info", "warning", "error", "critical"),
+        default="info",
+    )
+
+
 def parse_args():
     """Parse arguments."""
     parser = argparse.ArgumentParser(
@@ -928,63 +1031,12 @@ def parse_args():
             "for training AI models to do CVE backports."
         )
     )
-    parser.add_argument(
-        "-l",
-        "--loglevel",
-        help="The level of log messages to show",
-        choices=("debug", "info", "warning", "error", "critical"),
-        default="info",
-    )
+    add_log_level_arg(parser)
     # https://github.com/python/cpython/issues/60512
     subparsers = parser.add_subparsers(dest="subcommand", required=True)
-    parser_package_cves = subparsers.add_parser(
-        "package-cves", description="Find CVE backports in distribution package repos"
-    )
-    parser_package_cves.add_argument(
-        "-d",
-        "--distros",
-        help="The distribution repo source(s) to look in",
-        metavar="distro1 distro2",
-        nargs="*",
-        choices=("fedora", "centos", "cosstream"),
-        default=("fedora", "centos", "cosstream"),
-    )
-    parser_package_cves.set_defaults(func=package_cves)
-    parser_upstream_backports = subparsers.add_parser(
-        "upstream-backports",
-        description="Find upstream repos from distro repos, then find backports in them",
-    )
-    parser_upstream_backports.add_argument(
-        "-d",
-        "--distros",
-        help="The distribution repo source(s) to look in",
-        metavar="distro1 distro2",
-        nargs="*",
-        choices=("fedora", "centos", "cosstream"),
-        default=("fedora", "centos", "cosstream"),
-    )
-    add_multiples_arg(parser_upstream_backports)
-    add_languages_arg(parser_upstream_backports)
-    parser_upstream_backports.set_defaults(func=upstream_backports)
-    parser_sourcerepo_backports = subparsers.add_parser(
-        "sourcerepo-backports",
-        description="Find backports in source repos specified by URL",
-    )
-    parser_sourcerepo_backports.add_argument(
-        "urls",
-        help="The git repo URL(s) to look in",
-        metavar="https://github.com/foo/bar https://gitlab.com/beep/moo",
-        nargs="+",
-    )
-    add_multiples_arg(parser_sourcerepo_backports)
-    add_languages_arg(parser_sourcerepo_backports)
-    # parser_sourcerepo_backports.add_argument(
-    #     "-p",
-    #     "--partials",
-    #     help="Whether or not the script should include datapoints where a file is missing from either the upstream or backport commit",
-    #     action="store_true",
-    # )
-    parser_sourcerepo_backports.set_defaults(func=sourcerepo_backports)
+    create_package_cves_cmd(subparsers)
+    create_upstream_backports_cmd(subparsers)
+    create_sourcerepo_backports_cmd(subparsers)
     args = parser.parse_args()
     return args
 
