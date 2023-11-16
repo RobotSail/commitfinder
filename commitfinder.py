@@ -823,6 +823,56 @@ def package_cves(args):
     )
 
 
+def tuple_from_backport(d: dict) -> tuple:
+    """
+    Accepts a dict representing a Backport object containing the following fields:
+    - upstream_commit_hash
+    - backport_commit_hash
+    - upstream_commit_message
+    - backport_commit_message
+    - upstream_patch
+    - backport_patch
+
+    Returns a tuple with the above fields
+    """
+    return (
+        d["upstream_commit_hash"],
+        d["backport_commit_hash"],
+        d["upstream_commit_message"],
+        d["backport_commit_message"],
+        d["upstream_patch"],
+        d["backport_patch"],
+    )
+
+
+def remove_duplicates_from_backports(
+    backports: dict[str, list[dict]]
+) -> dict[str, list[dict]]:
+    """
+    Given a dataset of Backports across various repos,
+    returns the same dataset with all duplicate values removed.
+    """
+
+    def remove_duplicates_from_list(l: list[dict]) -> list[dict]:
+        """
+        Accepts a list of Backports which have the following common features:
+        - upstream_commit_hash
+        - backport_commit_hash
+
+        Returns a list with all duplicate backports removed
+        """
+        unique_bps = {}
+        for bp in l:
+            key = f"{bp['upstream_commit_hash']}:{bp['backport_commit_hash']}"
+            if key not in unique_bps:
+                unique_bps[key] = bp
+            else:
+                print(f"encountered duplicate backport: {key}")
+        return list(unique_bps.values())
+
+    return {repo: remove_duplicates_from_list(bps) for repo, bps in backports.items()}
+
+
 def upstream_backports(args):
     """
     This finds upstream repos from the package source repos, where
@@ -847,6 +897,7 @@ def upstream_backports(args):
                     ncve_commits,
                 ), bpdata = _parse_multiple_upstream_backports(
                     urepo,
+                    args.languages
                     # args.partials,
                 )
             else:
@@ -855,7 +906,7 @@ def upstream_backports(args):
                     nunmatched,
                     nsingles,
                     ncve_commits,
-                ), bpdata = _parse_upstream_backports(urepo)
+                ), bpdata = _parse_upstream_backports(urepo, args.languages)
             matched += nmatched
             unmatched += nunmatched
             singles += nsingles
@@ -867,8 +918,69 @@ def upstream_backports(args):
     print(f"Found {singles} single-file Python code backport commits!")
     print(f"Found {multiples} multiple-file Python code backport commits!")
     print(f'Found {cve_commits} backport commits with "CVE" in the commit message!')
-    with open(f"{WORKDIR}/upstream-backports.json", "w", encoding="utf-8") as outfh:
-        json.dump(backports, outfh, indent=4)
+    backports_without_duplicates = remove_duplicates_from_backports(backports)
+    num_unique = sum(len(bps) for bps in backports_without_duplicates.values())
+    total_bps = sum(len(bps) for bps in backports.values())
+    print(f"Found {num_unique} unique backports out of {total_bps} total backports")
+    print(f"Found {total_bps - num_unique} duplicate backports")
+    with open(args.output, "w", encoding="utf-8") as outfh:
+        json.dump(backports_without_duplicates, outfh, indent=4)
+
+
+def investigate_duplicates(
+    backports: dict[str, list[dict]]
+) -> dict[list[tuple[str, dict]]]:
+    # this function just goes through and collects all backport objects with matching upstream commit hashes
+    # and outputs all of the ones with length over 1
+    matching_backports = {}
+    for repo, bps in backports.items():
+        for bp in bps:
+            upstream_hash = bp["upstream_commit_hash"]
+            if upstream_hash not in matching_backports:
+                matching_backports[upstream_hash] = []
+            matching_backports[upstream_hash].append((repo, bp))
+
+    return {k: v for k, v in matching_backports.items() if len(v) > 1}
+
+
+def clean_backports(args):
+    """
+    Given a dataset of Backports, remove any duplicates and write
+    the cleaned dataset to the output file.
+    """
+    with open(args.input, "r", encoding="utf-8") as infh:
+        backports = json.load(infh)
+
+    recurring_backports = investigate_duplicates(backports)
+    offending_repos = set(
+        repo for uh, bps in recurring_backports.items() for repo, bp in bps
+    )
+    print(f"Found {len(recurring_backports)} recurring backports")
+    print(f'repos with recurring backports: {", ".join(offending_repos)}')
+    with open("recurring.json", "w", encoding="utf-8") as outfh:
+        json.dump(recurring_backports, outfh, indent=4)
+
+    # for all of the recurring backports, group the repos together with the backports
+    commonly_grouped_repos = set()
+    for uh, bp_pairs in recurring_backports.items():
+        # collect all offending repos
+        repos = tuple([repo for repo, _ in bp_pairs])
+        commonly_grouped_repos.add(repos)
+    print(f"Found {len(commonly_grouped_repos)} groups of commonly grouped repos")
+    print(
+        f"commoonly grouped together repos:\n{json.dumps(list(commonly_grouped_repos), indent=4)})"
+    )
+
+    backports_without_duplicates = remove_duplicates_from_backports(backports)
+    num_unique = sum(len(bps) for bps in backports_without_duplicates.values())
+    total_bps = sum(len(bps) for bps in backports.values())
+    print(f"Found {num_unique} unique backports out of {total_bps} total backports")
+    print(f"Found {total_bps - num_unique} duplicate backports")
+
+    if not args.dry_run:
+        with open(args.output, "w", encoding="utf-8") as outfh:
+            json.dump(backports_without_duplicates, outfh, indent=4)
+        print(f"Cleaned backports written to {args.output}")
 
 
 def sourcerepo_backports(args):
@@ -919,8 +1031,13 @@ def sourcerepo_backports(args):
     print(f"Found {singles} single-file Python code backport commits!")
     print(f"Found {multiples} multiple-file Python code backport commits!")
     print(f'Found {cve_commits} backport commits with "CVE" in the commit message!')
+    backports_without_duplicates = remove_duplicates_from_backports(backports)
+    num_unique = sum(len(bps) for bps in backports_without_duplicates.values())
+    total_bps = sum(len(bps) for bps in backports.values())
+    print(f"Found {num_unique} unique backports out of {total_bps} total backports")
+    print(f"Found {total_bps - num_unique} duplicate backports")
     with open(args.output, "w", encoding="utf-8") as outfh:
-        json.dump(backports, outfh, indent=4)
+        json.dump(backports_without_duplicates, outfh, indent=4)
 
 
 def add_multiples_arg(parser: argparse.ArgumentParser) -> None:
@@ -993,6 +1110,23 @@ def add_distros_arg(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_input_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "-i",
+        "--input",
+        help="The input file to read from",
+        metavar="./workdir/input.json",
+    )
+
+
+def add_dry_run_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--dry-run",
+        help="Whether or not to actually write the output file",
+        action="store_true",
+    )
+
+
 def create_upstream_backports_cmd(subparsers: argparse.ArgumentParser) -> None:
     parser_upstream_backports = subparsers.add_parser(
         "upstream-backports",
@@ -1003,6 +1137,17 @@ def create_upstream_backports_cmd(subparsers: argparse.ArgumentParser) -> None:
     add_languages_arg(parser_upstream_backports)
     add_outfile_arg(parser_upstream_backports)
     parser_upstream_backports.set_defaults(func=upstream_backports)
+
+
+def create_clean_backports_cmd(subparsers: argparse.ArgumentParser) -> None:
+    parser_clean_backports = subparsers.add_parser(
+        "clean-backports",
+        description="Remove duplicate backports from a dataset",
+    )
+    add_input_arg(parser_clean_backports)
+    add_outfile_arg(parser_clean_backports)
+    add_dry_run_arg(parser_clean_backports)
+    parser_clean_backports.set_defaults(func=clean_backports)
 
 
 def create_package_cves_cmd(subparsers: argparse.ArgumentParser) -> None:
@@ -1037,6 +1182,7 @@ def parse_args():
     create_package_cves_cmd(subparsers)
     create_upstream_backports_cmd(subparsers)
     create_sourcerepo_backports_cmd(subparsers)
+    create_clean_backports_cmd(subparsers)
     args = parser.parse_args()
     return args
 
