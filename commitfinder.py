@@ -36,6 +36,8 @@ from cached_property import cached_property
 import pygit2
 import requests
 
+from pygit2 import Commit, Walker
+
 # pylint:disable=invalid-name
 logger = logging.getLogger(__name__)
 
@@ -115,7 +117,7 @@ class Repo:
         branch = self.pyrepo.branches[f"origin/{branch}"]
         return self.checkout_spec(branch)
 
-    def is_cve_commit(self, commit, checkdiff=True):
+    def is_cve_commit(self, commit: Commit, checkdiff: bool = True):
         msg = commit.message
         if "Merge: " in msg:
             # merge commit
@@ -155,7 +157,7 @@ class Repo:
                     return True
         return False
 
-    def backport_of(self, commit):
+    def backport_of(self, commit: Commit):
         """
         Given a commit (object), guess if it's a backport of a commit
         from the head branch and - if possible - of which commit.
@@ -164,13 +166,11 @@ class Repo:
         None means it's a backport but we don't know what commit it's
         a backport of.
         """
-        source = None
         msg = commit.message
         summ = (msg.splitlines() or [""])[0]
         msg = msg.lower()
         if not ("backport" in msg or "cherry picked from" in msg):
             return False
-        headcommits = self.headcommits
         # this check looks odd, but there are repos with commits on
         # HEAD which looks like backports and those same commits in
         # other branches, e.g. github aio-libs/aiohttp 74e3d74 . So
@@ -195,7 +195,7 @@ class Repo:
             return None
         return False
 
-    def all_commits(self, branch):
+    def all_commits(self, branch: str) -> Walker | None:
         if not branch.startswith("origin/"):
             branch = f"origin/{branch}"
         try:
@@ -209,9 +209,9 @@ class Repo:
                 self.name,
                 str(err),
             )
-            return []
+            return None
 
-    def files_created(self, commit):
+    def files_created(self, commit: Commit) -> list:
         """Returns a tuple of filenames created by a given commit."""
         if isinstance(commit, str):
             commit = self.pyrepo.revparse_single(commit)
@@ -229,7 +229,7 @@ class Repo:
                 waitforfile = True
         return patchfiles
 
-    def files_touched(self, commit):
+    def files_touched(self, commit: Commit) -> list:
         return [
             line.split()[-1]
             for line in self.pyrepo.diff(commit.parents[0], commit)
@@ -237,18 +237,18 @@ class Repo:
             .splitlines()
         ]
 
-    def python_files_touched(self, commit) -> list[str]:
+    def python_files_touched(self, commit: Commit) -> list[str]:
         return [fname for fname in self.files_touched(commit) if fname.endswith(".py")]
 
-    def golang_files_touched(self, commit) -> list[str]:
+    def golang_files_touched(self, commit: Commit) -> list[str]:
         return [fname for fname in self.files_touched(commit) if fname.endswith(".go")]
 
-    def java_files_touched(self, commit) -> list[str]:
+    def java_files_touched(self, commit: Commit) -> list[str]:
         return [
             fname for fname in self.files_touched(commit) if fname.endswith(".java")
         ]
 
-    def javascript_files_touched(self, commit) -> list[str]:
+    def javascript_files_touched(self, commit: Commit) -> list[str]:
         extensions = [".js", ".jsx", ".ts", ".tsx"]
         return [
             fname
@@ -256,7 +256,7 @@ class Repo:
             if any(fname.endswith(ext) for ext in extensions)
         ]
 
-    def python_code_files_touched(self, commit) -> list[str]:
+    def python_code_files_touched(self, commit: Commit) -> list[str]:
         return [
             fname
             for fname in self.python_files_touched(commit)
@@ -268,14 +268,14 @@ class Repo:
             )
         ]
 
-    def golang_code_files_touched(self, commit) -> list[str]:
+    def golang_code_files_touched(self, commit: Commit) -> list[str]:
         return [
             fname
             for fname in self.golang_files_touched(commit)
             if not (fname.endswith("_test.go"))
         ]
 
-    def javascript_code_files_touched(self, commit) -> list[str]:
+    def javascript_code_files_touched(self, commit: Commit) -> list[str]:
         js_jsx_extensions = [".js", ".jsx", ".ts", ".tsx"]
         misc_file_types = [
             ".test",
@@ -298,7 +298,7 @@ class Repo:
             )
         ]
 
-    def java_code_files_touched(self, commit) -> list[str]:
+    def java_code_files_touched(self, commit: Commit) -> list[str]:
         return [
             fname
             for fname in self.java_files_touched(commit)
@@ -309,7 +309,7 @@ class Repo:
             )
         ]
 
-    def patch_from_commit(self, commit, filenames):
+    def patch_from_commit(self, commit: Commit, filenames: list[str]) -> str:
         """
         Return the patch text for a given commit. If filenames is
         [], give the whole patch text; otherwise give the patch text
@@ -320,15 +320,14 @@ class Repo:
         if filenames:
             args.append("--")
             args.extend(filenames)
-        patch = subprocess.check_output(
+        return subprocess.check_output(
             args,
             cwd=self.workdir,
             encoding="utf-8",
             stderr=subprocess.DEVNULL,
         )
-        return patch
 
-    def file_from_commit(self, commit, filename):
+    def file_from_commit(self, commit: Commit, filename: str):
         """
         Show a file from a commit. Thanks to
         https://github.com/libgit2/pygit2/issues/752 ...
@@ -337,7 +336,9 @@ class Repo:
             "utf-8"
         )
 
-    def code_files_touched(self, commit, selected_languages: list[str]) -> list[str]:
+    def code_files_touched(
+        self, commit: Commit, selected_languages: list[str]
+    ) -> list[str]:
         files = []
         extractors = {
             "python": self.python_code_files_touched,
@@ -358,12 +359,14 @@ class Repo:
                 if self.pyrepo.branches[branch].is_head():
                     # we're looking for backports...
                     continue
-                for commit in self.all_commits(branch):
+                all_commits = self.all_commits(branch)
+                if not all_commits:
+                    continue
+                for commit in all_commits:
                     if commit.hex in checked:
                         continue
                     checked.add(commit.hex)
-                    bportof = self.backport_of(commit)
-                    if bportof != False:
+                    if bportof := self.backport_of(commit):
                         touched = self.code_files_touched(commit, selected_languages)
                         backports.append((commit, bportof, touched))
             except ValueError:
