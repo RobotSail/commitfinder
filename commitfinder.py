@@ -64,6 +64,125 @@ def get_cve_id(s: str) -> str | None:
     return None
 
 
+def is_go_file(fname: str) -> bool:
+    return fname.endswith(".go")
+
+
+def is_go_code_file(fname: str) -> bool:
+    return is_go_file(fname) and not fname.lower().endswith("_test.go")
+
+
+def is_java_file(fname: str) -> bool:
+    return fname.endswith(".java")
+
+
+def is_java_code_file(fname: str) -> bool:
+    return is_java_file(fname) and not fname.lower().endswith("Test.java")
+
+
+def is_javascript_file(fname: str) -> bool:
+    extensions = [".js", ".jsx", ".ts", ".tsx", ".json"]
+    return any(fname.endswith(ext) for ext in extensions)
+
+
+def is_javascript_code_file(fname: str) -> bool:
+    return is_javascript_file(fname) and not any(
+        fname.endswith(ext)
+        for ext in [".test", ".spec", ".config", "eslintrc", "prettierrc", "babelrc"]
+    )
+
+
+def is_python_file(fname: str) -> bool:
+    return fname.endswith(".py")
+
+
+def is_python_code_file(fname: str) -> bool:
+    return is_python_file(fname) and not (
+        fname.startswith("test")
+        or fname.startswith("doc/")
+        or fname == "setup.py"
+        or "/test_" in fname
+    )
+
+
+def select_javascript_files(files: list[str]) -> list[str]:
+    return [f for f in files if is_javascript_file(f)]
+
+
+def select_javascript_code_files(files: list[str]) -> list[str]:
+    return [f for f in files if is_javascript_code_file(f)]
+
+
+def select_python_code_files(files: list[str]) -> list[str]:
+    return [fname for fname in files if is_python_code_file(fname)]
+
+
+def select_python_files(files: list[str]) -> list[str]:
+    return [fname for fname in files if is_python_file(fname)]
+
+
+def select_go_code_files(files: list[str]) -> list[str]:
+    return [fname for fname in files if is_go_code_file(fname)]
+
+
+def select_go_files(files: list[str]) -> list[str]:
+    return [f for f in files if is_go_file(f)]
+
+
+def select_java_files(files: list[str]) -> list[str]:
+    return [f for f in files if is_java_file(f)]
+
+
+def select_java_code_files(files: list[str]) -> list[str]:
+    return [f for f in files if is_java_code_file(f)]
+
+
+"""
+Identifies whether the given file is a code file
+for the given language. Excludes secondary files
+such as tests, configs, etc.
+"""
+CODE_FILE_IDENTIFIERS = {
+    "python": is_python_code_file,
+    "golang": is_go_code_file,
+    "javascript": is_javascript_code_file,
+    "java": is_java_code_file,
+}
+
+"""
+Identifies whether or not a given file
+is a code file for the given language.
+"""
+FILE_IDENTIFIERS = {
+    "python": is_python_file,
+    "golang": is_go_file,
+    "javascript": is_javascript_file,
+    "java": is_java_file,
+}
+
+"""
+Selects only the files responsible for functionality
+in each respective language. Excludes secondary
+files such as tests, configs, etc.
+"""
+CODE_FILE_SELECTORS = {
+    "python": select_python_code_files,
+    "golang": select_go_code_files,
+    "javascript": select_javascript_code_files,
+    "java": select_java_code_files,
+}
+
+"""
+Selects all files that are code files for the given language.
+"""
+FILE_SELECTORS = {
+    "python": select_python_files,
+    "golang": select_go_files,
+    "javascript": select_javascript_files,
+    "java": select_java_files,
+}
+
+
 class Repo:
     def __init__(self, url, source):
         self.url = url
@@ -237,77 +356,20 @@ class Repo:
             .splitlines()
         ]
 
-    def python_files_touched(self, commit: Commit) -> list[str]:
-        return [fname for fname in self.files_touched(commit) if fname.endswith(".py")]
-
-    def golang_files_touched(self, commit: Commit) -> list[str]:
-        return [fname for fname in self.files_touched(commit) if fname.endswith(".go")]
-
-    def java_files_touched(self, commit: Commit) -> list[str]:
-        return [
-            fname for fname in self.files_touched(commit) if fname.endswith(".java")
-        ]
-
-    def javascript_files_touched(self, commit: Commit) -> list[str]:
-        extensions = [".js", ".jsx", ".ts", ".tsx"]
-        return [
-            fname
-            for fname in self.files_touched(commit)
-            if any(fname.endswith(ext) for ext in extensions)
-        ]
-
-    def python_code_files_touched(self, commit: Commit) -> list[str]:
-        return [
-            fname
-            for fname in self.python_files_touched(commit)
-            if not (
-                fname.startswith("test")
-                or fname.startswith("doc/")
-                or fname == "setup.py"
-                or "/test_" in fname
-            )
-        ]
-
-    def golang_code_files_touched(self, commit: Commit) -> list[str]:
-        return [
-            fname
-            for fname in self.golang_files_touched(commit)
-            if not (fname.endswith("_test.go"))
-        ]
-
-    def javascript_code_files_touched(self, commit: Commit) -> list[str]:
-        js_jsx_extensions = [".js", ".jsx", ".ts", ".tsx"]
-        misc_file_types = [
-            ".test",
-            ".spec",
-            ".config",
-            "eslintrc",
-            "prettierrc",
-            "babelrc",
-        ]
-        misc_file_extensions = [
-            f"{ext}.{fext}" for ext in misc_file_types for fext in js_jsx_extensions
-        ]
-        return [
-            fname
-            for fname in self.javascript_files_touched(commit)
-            if not (
-                any(fname.endswith(ext) for ext in misc_file_extensions)
-                or fname.startswith("test")
-                or fname.startswith("doc/")
-            )
-        ]
-
-    def java_code_files_touched(self, commit: Commit) -> list[str]:
-        return [
-            fname
-            for fname in self.java_files_touched(commit)
-            if not (
-                fname.endswith("Test.java")
-                or fname.startswith("doc/")
-                or fname.startswith("test")
-            )
-        ]
+    def files_renamed(self, commit: Commit) -> list[dict]:
+        """
+        Given a commit, returns a list containing all of the files that were renamed,
+        including their old names and new name.
+        """
+        renamed = []
+        diff = self.pyrepo.diff(commit.parents[0], commit)
+        diff.find_similar()
+        for delta in diff.deltas:
+            if delta.status == pygit2.GIT_DELTA_RENAMED:
+                renamed.append(
+                    {"old_file": delta.old_file.path, "new_file": delta.new_file.path}
+                )
+        return renamed
 
     def patch_from_commit(self, commit: Commit, filenames: list[str]) -> str:
         """
@@ -339,16 +401,32 @@ class Repo:
     def code_files_touched(
         self, commit: Commit, selected_languages: list[str]
     ) -> list[str]:
-        files = []
-        extractors = {
-            "python": self.python_code_files_touched,
-            "golang": self.golang_code_files_touched,
-            "javascript": self.javascript_code_files_touched,
-            "java": self.java_code_files_touched,
-        }
+        files_touched = self.files_touched(commit)
+        code_files = []
         for lang in selected_languages:
-            files.extend(extractors[lang](commit))
-        return files
+            code_files.extend(CODE_FILE_SELECTORS[lang](files_touched))
+        return code_files
+
+    def code_files_renamed(
+        self, commit: Commit, selected_languages: list[str]
+    ) -> list[dict]:
+        """
+        Given a commit and a set of selected languages, this returns a list of all the files
+        that were renamed, and their filepaths.
+        """
+        selected_renames = []
+        renamed_files = self.files_renamed(commit)
+        for pair in renamed_files:
+            either_is_code_file = False
+            for lang in selected_languages:
+                if CODE_FILE_IDENTIFIERS[lang](
+                    pair["old_file"]
+                ) or CODE_FILE_IDENTIFIERS[lang](pair["new_file"]):
+                    either_is_code_file = True
+                    break
+            if either_is_code_file:
+                selected_renames.append(pair)
+        return selected_renames
 
     def find_backport_commits(self, selected_languages: list[str]) -> list:
         """Find backport commits."""
@@ -368,7 +446,8 @@ class Repo:
                     checked.add(commit.hex)
                     if bportof := self.backport_of(commit):
                         touched = self.code_files_touched(commit, selected_languages)
-                        backports.append((commit, bportof, touched))
+                        renamed = self.code_files_renamed(commit, selected_languages)
+                        backports.append((commit, bportof, touched, renamed))
             except ValueError:
                 # this probably means the branch is HEAD or something
                 pass
@@ -635,7 +714,7 @@ def _parse_multiple_upstream_backports(
     bpdata = []
     bps = repo.find_backport_commits(selected_languages)
     if bps:
-        for commit, ocommit, touched in bps:
+        for commit, ocommit, touched, renamed in bps:
             summary = (commit.message.splitlines() or [""])[0]
             out = ""
             if ocommit:
@@ -663,6 +742,8 @@ def _parse_multiple_upstream_backports(
                 continue
             obefore = repo.pyrepo.revparse_single(f"{ocommit.hex}^")
             bbefore = repo.pyrepo.revparse_single(f"{commit.hex}^")
+            backport_renamed = repo.code_files_renamed(commit, selected_languages)
+            upstream_renamed = repo.code_files_renamed(ocommit, selected_languages)
             affected_files = get_affected_files(
                 repo,
                 touched,
@@ -677,10 +758,12 @@ def _parse_multiple_upstream_backports(
                     "upstream_commit_hash": ocommit.hex,
                     "upstream_commit_message": ocommit.message,
                     "upstream_patch": opatch,
+                    "upstream_files_renamed": upstream_renamed,
                     "backport_commit_hash": commit.hex,
                     "backport_commit_message": commit.message,
                     "backport_patch": bpatch,
                     "affected_files": affected_files,
+                    "backport_files_renamed": backport_renamed,
                     "files_touched": touched,
                     "is_cve_commit": is_cve_commit,
                     "cve_id": get_cve_id(commit.message),
@@ -750,6 +833,10 @@ def _parse_upstream_backports(
             except UnicodeDecodeError:
                 logger.warning("Could not parse one of the files! Ignorning...")
                 continue
+            renamed_files_upstream = repo.code_files_renamed(
+                ocommit, selected_languages
+            )
+            renamed_files_backport = repo.code_files_renamed(commit, selected_languages)
             bpdata.append(
                 {
                     "upstream_before": ubfile,
@@ -757,11 +844,13 @@ def _parse_upstream_backports(
                     "upstream_commit_message": ocommit.message,
                     "upstream_patch": opatch,
                     "upstream_after": uafile,
+                    "upstream_files_renamed": renamed_files_upstream,
                     "backport_before": bbfile,
                     "backport_commit_hash": commit.hex,
                     "backport_commit_message": commit.message,
                     "backport_patch": bpatch,
                     "backport_after": bafile,
+                    "backport_files_renamed": renamed_files_backport,
                     "is_cve_commit": is_cve_commit,
                     "cve_id": get_cve_id(commit.message),
                 }
