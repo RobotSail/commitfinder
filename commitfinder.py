@@ -36,6 +36,8 @@ from cached_property import cached_property
 import pygit2
 import requests
 
+from pygit2 import Commit, Walker
+
 # pylint:disable=invalid-name
 logger = logging.getLogger(__name__)
 
@@ -60,6 +62,125 @@ def get_cve_id(s: str) -> str | None:
     if match:
         return match.group(0)
     return None
+
+
+def is_go_file(fname: str) -> bool:
+    return fname.endswith(".go")
+
+
+def is_go_code_file(fname: str) -> bool:
+    return is_go_file(fname) and not fname.lower().endswith("_test.go")
+
+
+def is_java_file(fname: str) -> bool:
+    return fname.endswith(".java")
+
+
+def is_java_code_file(fname: str) -> bool:
+    return is_java_file(fname) and not fname.lower().endswith("Test.java")
+
+
+def is_javascript_file(fname: str) -> bool:
+    extensions = [".js", ".jsx", ".ts", ".tsx", ".json"]
+    return any(fname.endswith(ext) for ext in extensions)
+
+
+def is_javascript_code_file(fname: str) -> bool:
+    return is_javascript_file(fname) and not any(
+        fname.endswith(ext)
+        for ext in [".test", ".spec", ".config", "eslintrc", "prettierrc", "babelrc"]
+    )
+
+
+def is_python_file(fname: str) -> bool:
+    return fname.endswith(".py")
+
+
+def is_python_code_file(fname: str) -> bool:
+    return is_python_file(fname) and not (
+        fname.startswith("test")
+        or fname.startswith("doc/")
+        or fname == "setup.py"
+        or "/test_" in fname
+    )
+
+
+def select_javascript_files(files: list[str]) -> list[str]:
+    return [f for f in files if is_javascript_file(f)]
+
+
+def select_javascript_code_files(files: list[str]) -> list[str]:
+    return [f for f in files if is_javascript_code_file(f)]
+
+
+def select_python_code_files(files: list[str]) -> list[str]:
+    return [fname for fname in files if is_python_code_file(fname)]
+
+
+def select_python_files(files: list[str]) -> list[str]:
+    return [fname for fname in files if is_python_file(fname)]
+
+
+def select_go_code_files(files: list[str]) -> list[str]:
+    return [fname for fname in files if is_go_code_file(fname)]
+
+
+def select_go_files(files: list[str]) -> list[str]:
+    return [f for f in files if is_go_file(f)]
+
+
+def select_java_files(files: list[str]) -> list[str]:
+    return [f for f in files if is_java_file(f)]
+
+
+def select_java_code_files(files: list[str]) -> list[str]:
+    return [f for f in files if is_java_code_file(f)]
+
+
+"""
+Identifies whether the given file is a code file
+for the given language. Excludes secondary files
+such as tests, configs, etc.
+"""
+CODE_FILE_IDENTIFIERS = {
+    "python": is_python_code_file,
+    "golang": is_go_code_file,
+    "javascript": is_javascript_code_file,
+    "java": is_java_code_file,
+}
+
+"""
+Identifies whether or not a given file
+is a code file for the given language.
+"""
+FILE_IDENTIFIERS = {
+    "python": is_python_file,
+    "golang": is_go_file,
+    "javascript": is_javascript_file,
+    "java": is_java_file,
+}
+
+"""
+Selects only the files responsible for functionality
+in each respective language. Excludes secondary
+files such as tests, configs, etc.
+"""
+CODE_FILE_SELECTORS = {
+    "python": select_python_code_files,
+    "golang": select_go_code_files,
+    "javascript": select_javascript_code_files,
+    "java": select_java_code_files,
+}
+
+"""
+Selects all files that are code files for the given language.
+"""
+FILE_SELECTORS = {
+    "python": select_python_files,
+    "golang": select_go_files,
+    "javascript": select_javascript_files,
+    "java": select_java_files,
+}
 
 
 class Repo:
@@ -115,7 +236,7 @@ class Repo:
         branch = self.pyrepo.branches[f"origin/{branch}"]
         return self.checkout_spec(branch)
 
-    def is_cve_commit(self, commit, checkdiff=True):
+    def is_cve_commit(self, commit: Commit, checkdiff: bool = True):
         msg = commit.message
         if "Merge: " in msg:
             # merge commit
@@ -155,7 +276,7 @@ class Repo:
                     return True
         return False
 
-    def backport_of(self, commit):
+    def backport_of(self, commit: Commit):
         """
         Given a commit (object), guess if it's a backport of a commit
         from the head branch and - if possible - of which commit.
@@ -164,13 +285,11 @@ class Repo:
         None means it's a backport but we don't know what commit it's
         a backport of.
         """
-        source = None
         msg = commit.message
         summ = (msg.splitlines() or [""])[0]
         msg = msg.lower()
         if not ("backport" in msg or "cherry picked from" in msg):
             return False
-        headcommits = self.headcommits
         # this check looks odd, but there are repos with commits on
         # HEAD which looks like backports and those same commits in
         # other branches, e.g. github aio-libs/aiohttp 74e3d74 . So
@@ -195,7 +314,7 @@ class Repo:
             return None
         return False
 
-    def all_commits(self, branch):
+    def all_commits(self, branch: str) -> Walker | None:
         if not branch.startswith("origin/"):
             branch = f"origin/{branch}"
         try:
@@ -209,9 +328,9 @@ class Repo:
                 self.name,
                 str(err),
             )
-            return []
+            return None
 
-    def files_created(self, commit):
+    def files_created(self, commit: Commit) -> list:
         """Returns a tuple of filenames created by a given commit."""
         if isinstance(commit, str):
             commit = self.pyrepo.revparse_single(commit)
@@ -229,7 +348,7 @@ class Repo:
                 waitforfile = True
         return patchfiles
 
-    def files_touched(self, commit):
+    def files_touched(self, commit: Commit) -> list:
         return [
             line.split()[-1]
             for line in self.pyrepo.diff(commit.parents[0], commit)
@@ -237,79 +356,22 @@ class Repo:
             .splitlines()
         ]
 
-    def python_files_touched(self, commit) -> list[str]:
-        return [fname for fname in self.files_touched(commit) if fname.endswith(".py")]
+    def files_renamed(self, commit: Commit) -> list[dict]:
+        """
+        Given a commit, returns a list containing all of the files that were renamed,
+        including their old names and new name.
+        """
+        renamed = []
+        diff = self.pyrepo.diff(commit.parents[0], commit)
+        diff.find_similar()
+        for delta in diff.deltas:
+            if delta.status == pygit2.GIT_DELTA_RENAMED:
+                renamed.append(
+                    {"old_file": delta.old_file.path, "new_file": delta.new_file.path}
+                )
+        return renamed
 
-    def golang_files_touched(self, commit) -> list[str]:
-        return [fname for fname in self.files_touched(commit) if fname.endswith(".go")]
-
-    def java_files_touched(self, commit) -> list[str]:
-        return [
-            fname for fname in self.files_touched(commit) if fname.endswith(".java")
-        ]
-
-    def javascript_files_touched(self, commit) -> list[str]:
-        extensions = [".js", ".jsx", ".ts", ".tsx"]
-        return [
-            fname
-            for fname in self.files_touched(commit)
-            if any(fname.endswith(ext) for ext in extensions)
-        ]
-
-    def python_code_files_touched(self, commit) -> list[str]:
-        return [
-            fname
-            for fname in self.python_files_touched(commit)
-            if not (
-                fname.startswith("test")
-                or fname.startswith("doc/")
-                or fname == "setup.py"
-                or "/test_" in fname
-            )
-        ]
-
-    def golang_code_files_touched(self, commit) -> list[str]:
-        return [
-            fname
-            for fname in self.golang_files_touched(commit)
-            if not (fname.endswith("_test.go"))
-        ]
-
-    def javascript_code_files_touched(self, commit) -> list[str]:
-        js_jsx_extensions = [".js", ".jsx", ".ts", ".tsx"]
-        misc_file_types = [
-            ".test",
-            ".spec",
-            ".config",
-            "eslintrc",
-            "prettierrc",
-            "babelrc",
-        ]
-        misc_file_extensions = [
-            f"{ext}.{fext}" for ext in misc_file_types for fext in js_jsx_extensions
-        ]
-        return [
-            fname
-            for fname in self.javascript_files_touched(commit)
-            if not (
-                any(fname.endswith(ext) for ext in misc_file_extensions)
-                or fname.startswith("test")
-                or fname.startswith("doc/")
-            )
-        ]
-
-    def java_code_files_touched(self, commit) -> list[str]:
-        return [
-            fname
-            for fname in self.java_files_touched(commit)
-            if not (
-                fname.endswith("Test.java")
-                or fname.startswith("doc/")
-                or fname.startswith("test")
-            )
-        ]
-
-    def patch_from_commit(self, commit, filenames):
+    def patch_from_commit(self, commit: Commit, filenames: list[str]) -> str:
         """
         Return the patch text for a given commit. If filenames is
         [], give the whole patch text; otherwise give the patch text
@@ -320,15 +382,14 @@ class Repo:
         if filenames:
             args.append("--")
             args.extend(filenames)
-        patch = subprocess.check_output(
+        return subprocess.check_output(
             args,
             cwd=self.workdir,
             encoding="utf-8",
             stderr=subprocess.DEVNULL,
         )
-        return patch
 
-    def file_from_commit(self, commit, filename):
+    def file_from_commit(self, commit: Commit, filename: str):
         """
         Show a file from a commit. Thanks to
         https://github.com/libgit2/pygit2/issues/752 ...
@@ -337,17 +398,35 @@ class Repo:
             "utf-8"
         )
 
-    def code_files_touched(self, commit, selected_languages: list[str]) -> list[str]:
-        files = []
-        extractors = {
-            "python": self.python_code_files_touched,
-            "golang": self.golang_code_files_touched,
-            "javascript": self.javascript_code_files_touched,
-            "java": self.java_code_files_touched,
-        }
+    def code_files_touched(
+        self, commit: Commit, selected_languages: list[str]
+    ) -> list[str]:
+        files_touched = self.files_touched(commit)
+        code_files = []
         for lang in selected_languages:
-            files.extend(extractors[lang](commit))
-        return files
+            code_files.extend(CODE_FILE_SELECTORS[lang](files_touched))
+        return code_files
+
+    def code_files_renamed(
+        self, commit: Commit, selected_languages: list[str]
+    ) -> list[dict]:
+        """
+        Given a commit and a set of selected languages, this returns a list of all the files
+        that were renamed, and their filepaths.
+        """
+        selected_renames = []
+        renamed_files = self.files_renamed(commit)
+        for pair in renamed_files:
+            either_is_code_file = False
+            for lang in selected_languages:
+                if CODE_FILE_IDENTIFIERS[lang](
+                    pair["old_file"]
+                ) or CODE_FILE_IDENTIFIERS[lang](pair["new_file"]):
+                    either_is_code_file = True
+                    break
+            if either_is_code_file:
+                selected_renames.append(pair)
+        return selected_renames
 
     def find_backport_commits(self, selected_languages: list[str]) -> list:
         """Find backport commits."""
@@ -358,14 +437,17 @@ class Repo:
                 if self.pyrepo.branches[branch].is_head():
                     # we're looking for backports...
                     continue
-                for commit in self.all_commits(branch):
+                all_commits = self.all_commits(branch)
+                if not all_commits:
+                    continue
+                for commit in all_commits:
                     if commit.hex in checked:
                         continue
                     checked.add(commit.hex)
-                    bportof = self.backport_of(commit)
-                    if bportof != False:
+                    if bportof := self.backport_of(commit):
                         touched = self.code_files_touched(commit, selected_languages)
-                        backports.append((commit, bportof, touched))
+                        renamed = self.code_files_renamed(commit, selected_languages)
+                        backports.append((commit, bportof, touched, renamed))
             except ValueError:
                 # this probably means the branch is HEAD or something
                 pass
@@ -632,7 +714,7 @@ def _parse_multiple_upstream_backports(
     bpdata = []
     bps = repo.find_backport_commits(selected_languages)
     if bps:
-        for commit, ocommit, touched in bps:
+        for commit, ocommit, touched, renamed in bps:
             summary = (commit.message.splitlines() or [""])[0]
             out = ""
             if ocommit:
@@ -660,6 +742,8 @@ def _parse_multiple_upstream_backports(
                 continue
             obefore = repo.pyrepo.revparse_single(f"{ocommit.hex}^")
             bbefore = repo.pyrepo.revparse_single(f"{commit.hex}^")
+            backport_renamed = repo.code_files_renamed(commit, selected_languages)
+            upstream_renamed = repo.code_files_renamed(ocommit, selected_languages)
             affected_files = get_affected_files(
                 repo,
                 touched,
@@ -674,10 +758,12 @@ def _parse_multiple_upstream_backports(
                     "upstream_commit_hash": ocommit.hex,
                     "upstream_commit_message": ocommit.message,
                     "upstream_patch": opatch,
+                    "upstream_files_renamed": upstream_renamed,
                     "backport_commit_hash": commit.hex,
                     "backport_commit_message": commit.message,
                     "backport_patch": bpatch,
                     "affected_files": affected_files,
+                    "backport_files_renamed": backport_renamed,
                     "files_touched": touched,
                     "is_cve_commit": is_cve_commit,
                     "cve_id": get_cve_id(commit.message),
@@ -747,6 +833,10 @@ def _parse_upstream_backports(
             except UnicodeDecodeError:
                 logger.warning("Could not parse one of the files! Ignorning...")
                 continue
+            renamed_files_upstream = repo.code_files_renamed(
+                ocommit, selected_languages
+            )
+            renamed_files_backport = repo.code_files_renamed(commit, selected_languages)
             bpdata.append(
                 {
                     "upstream_before": ubfile,
@@ -754,11 +844,13 @@ def _parse_upstream_backports(
                     "upstream_commit_message": ocommit.message,
                     "upstream_patch": opatch,
                     "upstream_after": uafile,
+                    "upstream_files_renamed": renamed_files_upstream,
                     "backport_before": bbfile,
                     "backport_commit_hash": commit.hex,
                     "backport_commit_message": commit.message,
                     "backport_patch": bpatch,
                     "backport_after": bafile,
+                    "backport_files_renamed": renamed_files_backport,
                     "is_cve_commit": is_cve_commit,
                     "cve_id": get_cve_id(commit.message),
                 }
@@ -823,6 +915,56 @@ def package_cves(args):
     )
 
 
+def tuple_from_backport(d: dict) -> tuple:
+    """
+    Accepts a dict representing a Backport object containing the following fields:
+    - upstream_commit_hash
+    - backport_commit_hash
+    - upstream_commit_message
+    - backport_commit_message
+    - upstream_patch
+    - backport_patch
+
+    Returns a tuple with the above fields
+    """
+    return (
+        d["upstream_commit_hash"],
+        d["backport_commit_hash"],
+        d["upstream_commit_message"],
+        d["backport_commit_message"],
+        d["upstream_patch"],
+        d["backport_patch"],
+    )
+
+
+def remove_duplicates_from_backports(
+    backports: dict[str, list[dict]]
+) -> dict[str, list[dict]]:
+    """
+    Given a dataset of Backports across various repos,
+    returns the same dataset with all duplicate values removed.
+    """
+
+    def remove_duplicates_from_list(l: list[dict]) -> list[dict]:
+        """
+        Accepts a list of Backports which have the following common features:
+        - upstream_commit_hash
+        - backport_commit_hash
+
+        Returns a list with all duplicate backports removed
+        """
+        unique_bps = {}
+        for bp in l:
+            key = f"{bp['upstream_commit_hash']}:{bp['backport_commit_hash']}"
+            if key not in unique_bps:
+                unique_bps[key] = bp
+            else:
+                print(f"encountered duplicate backport: {key}")
+        return list(unique_bps.values())
+
+    return {repo: remove_duplicates_from_list(bps) for repo, bps in backports.items()}
+
+
 def upstream_backports(args):
     """
     This finds upstream repos from the package source repos, where
@@ -847,6 +989,7 @@ def upstream_backports(args):
                     ncve_commits,
                 ), bpdata = _parse_multiple_upstream_backports(
                     urepo,
+                    args.languages
                     # args.partials,
                 )
             else:
@@ -855,7 +998,7 @@ def upstream_backports(args):
                     nunmatched,
                     nsingles,
                     ncve_commits,
-                ), bpdata = _parse_upstream_backports(urepo)
+                ), bpdata = _parse_upstream_backports(urepo, args.languages)
             matched += nmatched
             unmatched += nunmatched
             singles += nsingles
@@ -867,8 +1010,69 @@ def upstream_backports(args):
     print(f"Found {singles} single-file Python code backport commits!")
     print(f"Found {multiples} multiple-file Python code backport commits!")
     print(f'Found {cve_commits} backport commits with "CVE" in the commit message!')
-    with open(f"{WORKDIR}/upstream-backports.json", "w", encoding="utf-8") as outfh:
-        json.dump(backports, outfh, indent=4)
+    backports_without_duplicates = remove_duplicates_from_backports(backports)
+    num_unique = sum(len(bps) for bps in backports_without_duplicates.values())
+    total_bps = sum(len(bps) for bps in backports.values())
+    print(f"Found {num_unique} unique backports out of {total_bps} total backports")
+    print(f"Found {total_bps - num_unique} duplicate backports")
+    with open(args.output, "w", encoding="utf-8") as outfh:
+        json.dump(backports_without_duplicates, outfh, indent=4)
+
+
+def investigate_duplicates(
+    backports: dict[str, list[dict]]
+) -> dict[list[tuple[str, dict]]]:
+    # this function just goes through and collects all backport objects with matching upstream commit hashes
+    # and outputs all of the ones with length over 1
+    matching_backports = {}
+    for repo, bps in backports.items():
+        for bp in bps:
+            upstream_hash = bp["upstream_commit_hash"]
+            if upstream_hash not in matching_backports:
+                matching_backports[upstream_hash] = []
+            matching_backports[upstream_hash].append((repo, bp))
+
+    return {k: v for k, v in matching_backports.items() if len(v) > 1}
+
+
+def clean_backports(args):
+    """
+    Given a dataset of Backports, remove any duplicates and write
+    the cleaned dataset to the output file.
+    """
+    with open(args.input, "r", encoding="utf-8") as infh:
+        backports = json.load(infh)
+
+    recurring_backports = investigate_duplicates(backports)
+    offending_repos = set(
+        repo for uh, bps in recurring_backports.items() for repo, bp in bps
+    )
+    print(f"Found {len(recurring_backports)} recurring backports")
+    print(f'repos with recurring backports: {", ".join(offending_repos)}')
+    with open("recurring.json", "w", encoding="utf-8") as outfh:
+        json.dump(recurring_backports, outfh, indent=4)
+
+    # for all of the recurring backports, group the repos together with the backports
+    commonly_grouped_repos = set()
+    for uh, bp_pairs in recurring_backports.items():
+        # collect all offending repos
+        repos = tuple([repo for repo, _ in bp_pairs])
+        commonly_grouped_repos.add(repos)
+    print(f"Found {len(commonly_grouped_repos)} groups of commonly grouped repos")
+    print(
+        f"commoonly grouped together repos:\n{json.dumps(list(commonly_grouped_repos), indent=4)})"
+    )
+
+    backports_without_duplicates = remove_duplicates_from_backports(backports)
+    num_unique = sum(len(bps) for bps in backports_without_duplicates.values())
+    total_bps = sum(len(bps) for bps in backports.values())
+    print(f"Found {num_unique} unique backports out of {total_bps} total backports")
+    print(f"Found {total_bps - num_unique} duplicate backports")
+
+    if not args.dry_run:
+        with open(args.output, "w", encoding="utf-8") as outfh:
+            json.dump(backports_without_duplicates, outfh, indent=4)
+        print(f"Cleaned backports written to {args.output}")
 
 
 def sourcerepo_backports(args):
@@ -919,8 +1123,13 @@ def sourcerepo_backports(args):
     print(f"Found {singles} single-file Python code backport commits!")
     print(f"Found {multiples} multiple-file Python code backport commits!")
     print(f'Found {cve_commits} backport commits with "CVE" in the commit message!')
+    backports_without_duplicates = remove_duplicates_from_backports(backports)
+    num_unique = sum(len(bps) for bps in backports_without_duplicates.values())
+    total_bps = sum(len(bps) for bps in backports.values())
+    print(f"Found {num_unique} unique backports out of {total_bps} total backports")
+    print(f"Found {total_bps - num_unique} duplicate backports")
     with open(args.output, "w", encoding="utf-8") as outfh:
-        json.dump(backports, outfh, indent=4)
+        json.dump(backports_without_duplicates, outfh, indent=4)
 
 
 def add_multiples_arg(parser: argparse.ArgumentParser) -> None:
@@ -993,6 +1202,23 @@ def add_distros_arg(parser: argparse.ArgumentParser) -> None:
     )
 
 
+def add_input_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "-i",
+        "--input",
+        help="The input file to read from",
+        metavar="./workdir/input.json",
+    )
+
+
+def add_dry_run_arg(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--dry-run",
+        help="Whether or not to actually write the output file",
+        action="store_true",
+    )
+
+
 def create_upstream_backports_cmd(subparsers: argparse.ArgumentParser) -> None:
     parser_upstream_backports = subparsers.add_parser(
         "upstream-backports",
@@ -1003,6 +1229,17 @@ def create_upstream_backports_cmd(subparsers: argparse.ArgumentParser) -> None:
     add_languages_arg(parser_upstream_backports)
     add_outfile_arg(parser_upstream_backports)
     parser_upstream_backports.set_defaults(func=upstream_backports)
+
+
+def create_clean_backports_cmd(subparsers: argparse.ArgumentParser) -> None:
+    parser_clean_backports = subparsers.add_parser(
+        "clean-backports",
+        description="Remove duplicate backports from a dataset",
+    )
+    add_input_arg(parser_clean_backports)
+    add_outfile_arg(parser_clean_backports)
+    add_dry_run_arg(parser_clean_backports)
+    parser_clean_backports.set_defaults(func=clean_backports)
 
 
 def create_package_cves_cmd(subparsers: argparse.ArgumentParser) -> None:
@@ -1037,6 +1274,7 @@ def parse_args():
     create_package_cves_cmd(subparsers)
     create_upstream_backports_cmd(subparsers)
     create_sourcerepo_backports_cmd(subparsers)
+    create_clean_backports_cmd(subparsers)
     args = parser.parse_args()
     return args
 
